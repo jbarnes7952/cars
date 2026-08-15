@@ -25,6 +25,7 @@ skills/
 hooks/
   roster-inject.sh             UserPromptSubmit → periodic peer-roster context push (wired)
   tmux-relabel.sh              PostToolUse → tmux window/pane label (wired)
+  heartbeat.sh                 UserPromptSubmit/PostToolUse/Stop → bump last_seen (wired)
   session-start-register.sh    SessionStart → register (auto mode, unwired)
   session-end-deregister.sh    SessionEnd → deregister (auto mode, unwired)
 launch-session.sh          auto-mode launcher: mints name, exports it, runs claude --name
@@ -149,15 +150,14 @@ Priority order:
   Eviction runs lazily on every tool call — no background daemon.
 - Any tool call carrying a `session_name` bumps that session's `last_seen`.
 
-Optional: keep long-idle sessions fresh by wiring `heartbeat` into a Stop hook:
-
-```json
-"Stop": [{"hooks": [{"type": "command",
-  "command": "python3 -c \"import json,sys,subprocess;...\" "}]}]
-```
-
-(or simply let sessions go stale and rely on the first-turn re-registration —
-staleness is informational, not fatal).
+To keep active sessions fresh, wire `hooks/heartbeat.sh` into the
+UserPromptSubmit, PostToolUse, and Stop events (async, timeout 10). It calls
+`ledger_mcp.py hook-heartbeat`, which matches this session's row by
+`session_id`, then unique `cwd`, then the resolved name — so manually
+`/register`-ed sessions with custom names are covered too. Throttled to one
+DB write per `LEDGER_HEARTBEAT_EVERY` seconds (default 60) per CLI process.
+A session idle longer than the stale threshold still goes stale — staleness
+is informational, not fatal.
 
 ## MCP tools
 

@@ -12,6 +12,8 @@ Usage:
     ledger_mcp.py hook-deregister  SessionEnd hook helper (hook JSON on stdin)
     ledger_mcp.py hook-roster      UserPromptSubmit hook: every Nth prompt,
                                    emit the peer roster as additionalContext
+    ledger_mcp.py hook-heartbeat   activity hook helper: bump this session's
+                                   last_seen (hook JSON on stdin)
     ledger_mcp.py roster           print the roster text (debug/preview)
     ledger_mcp.py list [--stale]   pretty-print registered agents
 
@@ -585,6 +587,38 @@ def hook_deregister():
     call_tool("deregister", {"session_name": name})
 
 
+def hook_heartbeat():
+    """Bump last_seen for the ledger row belonging to this session.
+
+    A manually /register-ed session may use a name unrelated to the derived
+    one and carry no session_id, so match by session_id first, then by unique
+    cwd (session-per-worktree makes cwd a good key), then by resolved name.
+    """
+    hook = read_hook_input()
+    sid = hook.get("session_id") or ""
+    cwd = hook.get("cwd") or os.getcwd()
+    name = None
+    conn = connect()
+    try:
+        if sid:
+            row = conn.execute(
+                "SELECT session_name FROM agents WHERE session_id = ?", (sid,)
+            ).fetchone()
+            if row:
+                name = row["session_name"]
+        if name is None:
+            rows = conn.execute(
+                "SELECT session_name FROM agents WHERE cwd = ?", (cwd,)
+            ).fetchall()
+            if len(rows) == 1:
+                name = rows[0]["session_name"]
+    finally:
+        conn.close()
+    if name is None:
+        name, _ = resolve_name(hook)
+    call_tool("heartbeat", {"session_name": name})
+
+
 def build_roster(exclude_session_id=""):
     """Compact peer roster for context injection. Empty string if no fresh peers."""
     conn = connect()
@@ -702,6 +736,11 @@ def main():
             hook_deregister()
         except Exception:
             pass
+    elif cmd == "hook-heartbeat":
+        try:
+            hook_heartbeat()
+        except Exception:
+            pass  # a dead ledger must never disturb the session
     elif cmd == "hook-roster":
         try:
             hook_roster()

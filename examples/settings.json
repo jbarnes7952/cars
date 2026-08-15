@@ -1,5 +1,5 @@
 {
-  "//": "Example hook wiring. Merge into ~/.claude/settings.json (user-wide) or .claude/settings.json (per project). Replace /path/to/cars with the actual checkout path. Current mode wires UserPromptSubmit (periodic roster push) + PostToolUse (tmux relabel).",
+  "//": "Example hook wiring. Merge into ~/.claude/settings.json (user-wide) or .claude/settings.json (per project). Replace /path/to/cars with the actual checkout path. Current mode wires UserPromptSubmit (periodic roster push + heartbeat) + PostToolUse (tmux relabel + heartbeat) + Stop (heartbeat).",
   "env": {
     "LEDGER_ROSTER_EVERY": "5",
     "LEDGER_ROSTER_MAX": "15"
@@ -14,6 +14,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/heartbeat.sh",
+            "timeout": 10,
+            "async": true
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -24,6 +34,28 @@
             "type": "command",
             "command": "/path/to/cars/hooks/tmux-relabel.sh",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/heartbeat.sh",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/heartbeat.sh",
+            "timeout": 10,
+            "async": true
           }
         ]
       }
