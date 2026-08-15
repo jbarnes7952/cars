@@ -63,6 +63,25 @@ empty rosters emit nothing — zero context cost. Stale agents and the session's
 own entry are excluded. Preview the current roster text with
 `python3 ledger_mcp.py roster`.
 
+**Agents as tools (wired, on by default).** The MCP server also renders each
+fresh registered agent as a tool — `peer_<name>`, description = its routing
+card (`role — status. Ask when: <query_me_when>`) — so peers appear in the
+tool list exactly like MCP capabilities. Calling a peer tool returns its
+contact card; actual messaging is always native `SendMessage`. The server
+advertises `listChanged` and emits `notifications/tools/list_changed` when the
+registry shifts: immediately when the session's own register/update/deregister
+changes it, and via a background poll (default every 20 s) when *another*
+session's registration changes the shared DB. Whether a given Claude Code
+build re-fetches tools mid-session on that notification is client behavior —
+verify empirically; the tool list is always correct at session start
+regardless. Because `query_me_when` becomes a tool description, write it as a
+trigger condition ("message me before touching schema.sql"), not a topic.
+
+| var | default | meaning |
+|---|---|---|
+| `LEDGER_AGENT_TOOLS` | `1` | expose peers as tools; `0` = static six tools only |
+| `LEDGER_TOOLS_POLL` | `20` | seconds between registry polls for `list_changed`; `0` = notify only on own mutations |
+
 **Automatic registration (future, currently unwired).** The SessionStart/SessionEnd hooks
 and `launch-session.sh` implement lifecycle-driven auto registration. They
 work (tested) but are deliberately not wired into settings — hooks can't see

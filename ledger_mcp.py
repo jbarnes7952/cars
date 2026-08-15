@@ -15,16 +15,21 @@ Usage:
     ledger_mcp.py roster           print the roster text (debug/preview)
     ledger_mcp.py list [--stale]   pretty-print registered agents
 
-Roster config (env, set in ~/.claude/settings.json "env" block):
-    LEDGER_ROSTER_EVERY  inject every N prompts (default 5; 1=every, 0=off)
-    LEDGER_ROSTER_MAX    max agents listed per injection (default 15)
+Config (env, set in ~/.claude/settings.json "env" block):
+    LEDGER_ROSTER_EVERY  roster push every N prompts (default 5; 1=every, 0=off)
+    LEDGER_ROSTER_MAX    max agents per roster push / per tool list (default 15)
+    LEDGER_AGENT_TOOLS   expose each fresh agent as an MCP tool (default 1; 0=off)
+    LEDGER_TOOLS_POLL    seconds between registry polls for tools/list_changed
+                         notifications (default 20; 0=off)
 """
 
 import json
 import os
+import re
 import socket
 import sqlite3
 import sys
+import threading
 from datetime import datetime, timezone
 
 DB_PATH = os.environ.get(
@@ -332,6 +337,71 @@ TOOLS = [
 TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
 
 
+# ------------------------------------------------- dynamic per-agent tools
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def _peer_tool_name(session_name):
+    return "peer_" + re.sub(r"[^A-Za-z0-9_-]", "_", session_name)[:100]
+
+
+def fresh_agents(limit=None):
+    """Fresh (non-stale) records, newest first. Empty list on any DB failure."""
+    try:
+        conn = connect()
+    except Exception:
+        return []
+    try:
+        rows = conn.execute("SELECT * FROM agents ORDER BY last_seen DESC").fetchall()
+    finally:
+        conn.close()
+    recs = [r for r in (row_to_record(x) for x in rows) if not r["stale"]]
+    return recs[:limit] if limit else recs
+
+
+def dynamic_agent_tools():
+    """The registry rendered as MCP tools — one per fresh agent, description
+    = its routing card. Calling one returns the contact card; messaging is
+    always native SendMessage."""
+    if _env_int("LEDGER_AGENT_TOOLS", 1) <= 0:
+        return []
+    tools = []
+    for rec in fresh_agents(_env_int("LEDGER_ROSTER_MAX", ROSTER_MAX_DEFAULT)):
+        desc = " — ".join(x for x in (rec["role"], rec["status"]) if x) or "no role set"
+        proj = f" [{rec['project']}]" if rec["project"] else ""
+        ask = f" Ask when: {rec['query_me_when']}." if rec["query_me_when"] else ""
+        tools.append({
+            "name": _peer_tool_name(rec["session_name"]),
+            "description": (
+                f"Peer Claude session '{rec['session_name']}'{proj}: {desc}.{ask}"
+                f" Call for its contact card; to actually talk to it, use"
+                f" SendMessage (to: '{rec['session_name']}') — the ledger never"
+                f" delivers messages."
+            )[:400],
+            "inputSchema": {"type": "object", "properties": {}},
+        })
+    return tools
+
+
+def call_peer_tool(tool_name):
+    for rec in fresh_agents():
+        if _peer_tool_name(rec["session_name"]) == tool_name:
+            rec["contact"] = (
+                f"Address SendMessage to '{rec['session_name']}'. The ledger is"
+                " a directory only; it does not deliver messages."
+            )
+            return rec
+    raise ToolError(
+        f"{tool_name}: peer no longer registered (or stale); use find_agents"
+        " or native ListAgents instead"
+    )
+
+
 def call_tool(name, args):
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
@@ -347,17 +417,56 @@ def call_tool(name, args):
         conn.close()
 
 
+_STDOUT_LOCK = threading.Lock()
+
+
+def _write_msg(obj):
+    with _STDOUT_LOCK:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+
 def rpc_response(msg_id, result=None, error=None):
     resp = {"jsonrpc": "2.0", "id": msg_id}
     if error is not None:
         resp["error"] = error
     else:
         resp["result"] = result
-    sys.stdout.write(json.dumps(resp) + "\n")
-    sys.stdout.flush()
+    _write_msg(resp)
+
+
+MUTATING_TOOLS = {"register", "update_registration", "deregister"}
 
 
 def serve():
+    # sig state for tools/list_changed: "served" = dynamic-tool signature the
+    # client last fetched; "notified" = signature we last notified about
+    # (avoids re-notifying every poll if the client never re-fetches).
+    state = {"served": None, "notified": None}
+
+    def dyn_sig():
+        return json.dumps(dynamic_agent_tools(), sort_keys=True)
+
+    def notify_if_changed():
+        try:
+            sig = dyn_sig()
+        except Exception:
+            return
+        if state["served"] is not None and sig != state["served"] \
+                and sig != state["notified"]:
+            state["notified"] = sig
+            _write_msg({"jsonrpc": "2.0",
+                        "method": "notifications/tools/list_changed"})
+
+    poll = _env_int("LEDGER_TOOLS_POLL", 20)
+    if poll > 0 and _env_int("LEDGER_AGENT_TOOLS", 1) > 0:
+        def watcher():
+            import time
+            while True:
+                time.sleep(poll)
+                notify_if_changed()
+        threading.Thread(target=watcher, daemon=True).start()
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -375,26 +484,31 @@ def serve():
                 "protocolVersion": msg.get("params", {}).get(
                     "protocolVersion", "2025-06-18"
                 ),
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {"listChanged": True}},
                 "serverInfo": {"name": "ledger", "version": "1.0.0"},
             })
         elif method == "ping":
             rpc_response(msg_id, {})
         elif method == "tools/list":
-            rpc_response(msg_id, {
-                "tools": [
-                    {k: t[k] for k in ("name", "description", "inputSchema")}
-                    for t in TOOLS
-                ]
-            })
+            static = [{k: t[k] for k in ("name", "description", "inputSchema")}
+                      for t in TOOLS]
+            dyn = dynamic_agent_tools()
+            state["served"] = json.dumps(dyn, sort_keys=True)
+            rpc_response(msg_id, {"tools": static + dyn})
         elif method == "tools/call":
             params = msg.get("params", {})
+            name = params.get("name") or ""
             try:
-                result = call_tool(params.get("name"), params.get("arguments") or {})
+                if name.startswith("peer_") and name not in TOOLS_BY_NAME:
+                    result = call_peer_tool(name)
+                else:
+                    result = call_tool(name, params.get("arguments") or {})
                 rpc_response(msg_id, {
                     "content": [{"type": "text", "text": json.dumps(result)}],
                     "isError": False,
                 })
+                if name in MUTATING_TOOLS:
+                    notify_if_changed()  # our own registration changed the list
             except ToolError as exc:
                 rpc_response(msg_id, {
                     "content": [{"type": "text", "text": json.dumps({"error": str(exc)})}],
@@ -469,13 +583,6 @@ def hook_deregister():
     hook = read_hook_input()
     name, _ = resolve_name(hook)
     call_tool("deregister", {"session_name": name})
-
-
-def _env_int(name, default):
-    try:
-        return int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
 
 
 def build_roster(exclude_session_id=""):

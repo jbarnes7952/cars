@@ -35,8 +35,14 @@ existing row under that name.
 Fill the descriptive fields from `$ARGUMENTS` first, then from conversation
 context (what is this session actually working on?). If the session's purpose
 is still unclear, use `role: "unassigned"` and a short honest `status` rather
-than inventing detail. `query_me_when` should tell *other agents* when to
-message this session, e.g. "questions about the ledger schema or MCP tools".
+than inventing detail.
+
+`query_me_when` is rendered as a *tool description* in every peer session, so
+write it as a **trigger condition**, not a topic label — phrase it "message me
+when/before ...", naming the specific files, operations, or decisions that
+should make a peer stop and coordinate. Good: "message me before modifying
+schema.sql or anything touching the ledger.db format — I own the schema".
+Bad: "postgres questions". A vague topic gives peers no tripwire.
 
 If an obviously stale or derived leftover entry for this same session exists
 under a different name, ask the user before `mcp__ledger__deregister`-ing it.

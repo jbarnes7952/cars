@@ -265,6 +265,104 @@ class LedgerTest(unittest.TestCase):
         ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(sum(1 for l in ctx.splitlines() if l.startswith("- ")), 2)
 
+    # -------------------------------------------------------------- agent tools
+
+    def _stdio(self, msgs, **env_extra):
+        env = dict(os.environ, LEDGER_TOOLS_POLL="0", **env_extra)
+        proc = subprocess.run(
+            [sys.executable, SERVER, "serve"],
+            input="".join(json.dumps(m) + "\n" for m in msgs),
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        lines = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+        responses = {m["id"]: m for m in lines if "id" in m}
+        notifications = [m["method"] for m in lines if "id" not in m]
+        return responses, notifications
+
+    INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "test", "version": "0"}}}
+
+    def test_agent_tools_appear_and_notify_in_stream(self):
+        msgs = [
+            self.INIT,
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "register",
+                        "arguments": {"session_name": "pg-owner",
+                                      "role": "schema-owner",
+                                      "project": "webapp",
+                                      "query_me_when": "before schema changes"}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": "peer_pg-owner", "arguments": {}}},
+        ]
+        responses, notifications = self._stdio(msgs)
+        self.assertTrue(
+            responses[1]["result"]["capabilities"]["tools"]["listChanged"])
+        first = {t["name"] for t in responses[2]["result"]["tools"]}
+        self.assertNotIn("peer_pg-owner", first)
+        self.assertIn("notifications/tools/list_changed", notifications)
+        second = {t["name"]: t for t in responses[4]["result"]["tools"]}
+        self.assertIn("peer_pg-owner", second)
+        self.assertIn("before schema changes", second["peer_pg-owner"]["description"])
+        card = json.loads(responses[5]["result"]["content"][0]["text"])
+        self.assertEqual(card["session_name"], "pg-owner")
+        self.assertIn("SendMessage", card["contact"])
+
+    def test_agent_tools_disabled(self):
+        self.call("register", session_name="pg-owner")
+        msgs = [self.INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+        responses, notifications = self._stdio(msgs, LEDGER_AGENT_TOOLS="0")
+        names = {t["name"] for t in responses[2]["result"]["tools"]}
+        self.assertEqual(len(names), 6)
+        self.assertEqual(notifications, [])
+
+    def test_peer_tool_gone_after_deregister(self):
+        self.call("register", session_name="pg-owner")
+        msgs = [
+            self.INIT,
+            {"jsonrpc": "2.0", "id": 10, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "deregister",
+                        "arguments": {"session_name": "pg-owner"}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "peer_pg-owner", "arguments": {}}},
+        ]
+        responses, notifications = self._stdio(msgs)
+        self.assertIn("notifications/tools/list_changed", notifications)
+        self.assertTrue(responses[3]["result"]["isError"])
+
+    def test_watcher_notifies_on_external_registration(self):
+        import threading
+        env = dict(os.environ, LEDGER_TOOLS_POLL="1")
+        proc = subprocess.Popen(
+            [sys.executable, SERVER, "serve"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env,
+        )
+        got = threading.Event()
+        try:
+            proc.stdin.write(json.dumps(self.INIT) + "\n")
+            proc.stdin.write(json.dumps(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n")
+            proc.stdin.flush()
+            # wait until tools/list has been SERVED before mutating, else the
+            # served snapshot already contains the newcomer and nothing changes
+            for _ in range(2):
+                self.assertIn("\"id\"", proc.stdout.readline())
+            def reader():
+                for line in proc.stdout:
+                    if "notifications/tools/list_changed" in line:
+                        got.set()
+            threading.Thread(target=reader, daemon=True).start()
+            # external mutation: another session registers against the same DB
+            self.call("register", session_name="late-arrival", role="tester")
+            self.assertTrue(got.wait(timeout=10),
+                            "no list_changed within 10s of external register")
+        finally:
+            proc.stdin.close()
+            proc.wait(timeout=10)
+
     # -------------------------------------------------------------- MCP stdio
 
     def test_mcp_stdio_end_to_end(self):
@@ -291,8 +389,8 @@ class LedgerTest(unittest.TestCase):
             input="".join(json.dumps(m) + "\n" for m in msgs),
             capture_output=True, text=True, env=os.environ.copy(), timeout=30,
         )
-        responses = {r["id"]: r for r in
-                     (json.loads(l) for l in proc.stdout.splitlines() if l.strip())}
+        parsed = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+        responses = {r["id"]: r for r in parsed if "id" in r}
         self.assertEqual(len(responses), 6)  # notification got no response
         init = responses[1]["result"]
         self.assertEqual(init["serverInfo"]["name"], "ledger")
