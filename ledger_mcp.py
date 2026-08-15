@@ -10,7 +10,14 @@ Usage:
     ledger_mcp.py [serve]          MCP server on stdio (default)
     ledger_mcp.py hook-register    SessionStart hook helper (hook JSON on stdin)
     ledger_mcp.py hook-deregister  SessionEnd hook helper (hook JSON on stdin)
+    ledger_mcp.py hook-roster      UserPromptSubmit hook: every Nth prompt,
+                                   emit the peer roster as additionalContext
+    ledger_mcp.py roster           print the roster text (debug/preview)
     ledger_mcp.py list [--stale]   pretty-print registered agents
+
+Roster config (env, set in ~/.claude/settings.json "env" block):
+    LEDGER_ROSTER_EVERY  inject every N prompts (default 5; 1=every, 0=off)
+    LEDGER_ROSTER_MAX    max agents listed per injection (default 15)
 """
 
 import json
@@ -28,6 +35,9 @@ SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.s
 STALE_SECONDS = 10 * 60          # older than this => flagged stale
 EVICT_SECONDS = 24 * 60 * 60     # older than this => evicted (lazily)
 HEARTBEAT_SAMPLE_SECONDS = 5 * 60  # at most one heartbeat event per session per 5 min
+ROSTER_EVERY_DEFAULT = 5           # inject roster every N prompts (env LEDGER_ROSTER_EVERY)
+ROSTER_MAX_DEFAULT = 15            # max agents per roster (env LEDGER_ROSTER_MAX)
+ROSTER_STATE_MAX_AGE = 7 * 24 * 3600  # prune per-session counters older than this
 
 AGENT_COLUMNS = [
     "session_name", "session_id", "pid", "cwd", "project", "role",
@@ -461,6 +471,101 @@ def hook_deregister():
     call_tool("deregister", {"session_name": name})
 
 
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def build_roster(exclude_session_id=""):
+    """Compact peer roster for context injection. Empty string if no fresh peers."""
+    conn = connect()
+    try:
+        evict_stale(conn)
+        rows = conn.execute("SELECT * FROM agents ORDER BY last_seen DESC").fetchall()
+    finally:
+        conn.close()
+    max_agents = _env_int("LEDGER_ROSTER_MAX", ROSTER_MAX_DEFAULT)
+    lines = []
+    for row in rows:
+        rec = row_to_record(row)
+        if rec["stale"]:
+            continue
+        if exclude_session_id and rec["session_id"] == exclude_session_id:
+            continue
+        desc = " — ".join(x for x in (rec["role"], rec["status"]) if x)
+        proj = f" [{rec['project']}]" if rec["project"] else ""
+        ask = f"; ask about: {rec['query_me_when']}" if rec["query_me_when"] else ""
+        lines.append(f"- {rec['session_name']}{proj}: {desc}{ask}"[:200])
+        if len(lines) >= max_agents:
+            break
+    if not lines:
+        return ""
+    header = (
+        "[ledger] Active peer Claude sessions on this machine. Before making "
+        "changes to a project listed here, consider coordinating with its agent "
+        "first (SendMessage to the name below — e.g. a question or a requirements "
+        "spec). Details: mcp__ledger__find_agents. The ledger is a directory, "
+        "never a message channel."
+    )
+    return header + "\n" + "\n".join(lines)
+
+
+def _roster_state_dir():
+    return os.path.join(os.path.dirname(DB_PATH), "roster-state")
+
+
+def hook_roster():
+    """UserPromptSubmit hook: emit roster as additionalContext every N prompts.
+
+    Fires on the first prompt of a session, then every LEDGER_ROSTER_EVERY
+    prompts (counted per session_id). 0 disables. Prints nothing on off-cycle
+    prompts or when the roster is empty.
+    """
+    every = _env_int("LEDGER_ROSTER_EVERY", ROSTER_EVERY_DEFAULT)
+    if every <= 0:
+        return
+    hook = read_hook_input()
+    sid = (hook.get("session_id") or "unknown").replace(os.sep, "_")
+    state_dir = _roster_state_dir()
+    os.makedirs(state_dir, exist_ok=True)
+    state_path = os.path.join(state_dir, sid)
+
+    fire = True
+    if os.path.exists(state_path):
+        try:
+            with open(state_path) as f:
+                count = int(f.read().strip() or 0)
+        except (ValueError, OSError):
+            count = 0
+        count += 1
+        fire = count >= every
+    with open(state_path, "w") as f:
+        f.write("0" if fire else str(count))
+
+    # Opportunistic prune of counters from long-dead sessions.
+    try:
+        import time
+        for name in os.listdir(state_dir):
+            p = os.path.join(state_dir, name)
+            if time.time() - os.path.getmtime(p) > ROSTER_STATE_MAX_AGE:
+                os.unlink(p)
+    except OSError:
+        pass
+
+    if not fire:
+        return
+    roster = build_roster(exclude_session_id=hook.get("session_id") or "")
+    if roster:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": roster,
+            }
+        }))
+
+
 def cli_list(include_stale):
     result = call_tool("list_agents_detailed", {"include_stale": include_stale})
     agents = result["agents"]
@@ -490,6 +595,13 @@ def main():
             hook_deregister()
         except Exception:
             pass
+    elif cmd == "hook-roster":
+        try:
+            hook_roster()
+        except Exception:
+            pass  # a broken roster must never block prompt submission
+    elif cmd == "roster":
+        print(build_roster() or "(empty roster: no fresh registered agents)")
     elif cmd == "list":
         cli_list("--stale" in sys.argv[2:])
     else:

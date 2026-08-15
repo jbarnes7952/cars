@@ -207,6 +207,64 @@ class LedgerTest(unittest.TestCase):
         os.makedirs(bare)
         self.assertEqual(self.ledger.infer_project(bare), "norepo")
 
+    # -------------------------------------------------------------- roster hook
+
+    def _roster_hook(self, session_id="sess-a", every="3"):
+        env = dict(os.environ, LEDGER_ROSTER_EVERY=every)
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": session_id}),
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0)
+        return proc.stdout.strip()
+
+    def test_roster_fires_first_prompt_then_every_n(self):
+        self.call("register", session_name="peer-1", session_id="other",
+                  role="schema-owner", project="webapp", status="migrating db",
+                  query_me_when="db schema questions")
+        first = self._roster_hook()          # prompt 1: fires
+        payload = json.loads(first)
+        ctx = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"],
+                         "UserPromptSubmit")
+        self.assertIn("peer-1", ctx)
+        self.assertIn("webapp", ctx)
+        self.assertIn("db schema questions", ctx)
+        self.assertEqual(self._roster_hook(), "")   # prompt 2: quiet
+        self.assertEqual(self._roster_hook(), "")   # prompt 3: quiet
+        self.assertNotEqual(self._roster_hook(), "")  # prompt 4: fires again
+
+    def test_roster_excludes_self_and_stale(self):
+        self.call("register", session_name="me", session_id="sess-a")
+        self.call("register", session_name="old-peer", session_id="other-1")
+        self.call("register", session_name="fresh-peer", session_id="other-2",
+                  role="tester")
+        self._age("old-peer", 11 * 60)
+        ctx = json.loads(self._roster_hook())["hookSpecificOutput"][
+            "additionalContext"]
+        self.assertIn("fresh-peer", ctx)
+        self.assertNotIn("old-peer", ctx)
+        self.assertNotIn("- me", ctx)
+
+    def test_roster_disabled_and_empty(self):
+        self.call("register", session_name="peer-1", session_id="other")
+        self.assertEqual(self._roster_hook(every="0"), "")  # disabled
+        self.call("deregister", session_name="peer-1")
+        self.assertEqual(self._roster_hook(session_id="sess-b"), "")  # empty
+
+    def test_roster_max_cap(self):
+        for i in range(5):
+            self.call("register", session_name=f"peer-{i}", session_id=f"o{i}")
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="1", LEDGER_ROSTER_MAX="2")
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": "sess-cap"}),
+            capture_output=True, text=True, env=env,
+        )
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(sum(1 for l in ctx.splitlines() if l.startswith("- ")), 2)
+
     # -------------------------------------------------------------- MCP stdio
 
     def test_mcp_stdio_end_to_end(self):

@@ -1,6 +1,35 @@
 {
-  "//": "Example hook wiring. Merge into ~/.claude/settings.json (user-wide) or .claude/settings.json (per project). Replace /path/to/cars with the actual checkout path.",
+  "//": "Example hook wiring. Merge into ~/.claude/settings.json (user-wide) or .claude/settings.json (per project). Replace /path/to/cars with the actual checkout path. Current mode wires UserPromptSubmit (periodic roster push) + PostToolUse (tmux relabel).",
+  "env": {
+    "LEDGER_ROSTER_EVERY": "5",
+    "LEDGER_ROSTER_MAX": "15"
+  },
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/roster-inject.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__ledger__register|mcp__ledger__update_registration",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/tmux-relabel.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "auto-mode-reference (unwired; move entries into hooks to enable)": {
     "SessionStart": [
       {
         "hooks": [
@@ -17,17 +46,6 @@
           {
             "type": "command",
             "command": "/path/to/cars/hooks/session-end-deregister.sh"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "mcp__ledger__register|mcp__ledger__update_registration",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/cars/hooks/tmux-relabel.sh"
           }
         ]
       }

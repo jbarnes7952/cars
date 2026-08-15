@@ -23,9 +23,10 @@ skills/
   register/SKILL.md            /register — in-session manual upsert (current mode)
   deregister/SKILL.md          /deregister — in-session manual removal
 hooks/
+  roster-inject.sh             UserPromptSubmit → periodic peer-roster context push (wired)
+  tmux-relabel.sh              PostToolUse → tmux window/pane label (wired)
   session-start-register.sh    SessionStart → register (auto mode, unwired)
   session-end-deregister.sh    SessionEnd → deregister (auto mode, unwired)
-  tmux-relabel.sh              PostToolUse → tmux window/pane label (wired)
 launch-session.sh          auto-mode launcher: mints name, exports it, runs claude --name
 claude-md-snippet.md       protocol block to paste into CLAUDE.md
 examples/settings.json     hook wiring example (auto mode)
@@ -43,7 +44,26 @@ Missed deregisters are harmless: stale after 10 min, evicted after 24 h.
 The PostToolUse tmux-relabel hook stays wired since it triggers off the
 in-session ledger tool calls.
 
-**Automatic (future, currently unwired).** The SessionStart/SessionEnd hooks
+**Roster push (wired).** So sessions *know about* their peers without having
+to think to call `find_agents`, a `UserPromptSubmit` hook
+(`hooks/roster-inject.sh`) periodically injects a compact live roster into
+context — one line per fresh agent (`name [project]: role — status; ask
+about: ...`) plus guidance to coordinate via `SendMessage` before touching a
+peer's project. Cadence and size are configured via env vars in the `env`
+block of `~/.claude/settings.json`:
+
+| var | default | meaning |
+|---|---|---|
+| `LEDGER_ROSTER_EVERY` | `5` | inject on the first prompt of a session, then every Nth prompt; `1` = every prompt, `0` = off |
+| `LEDGER_ROSTER_MAX` | `15` | max agents per injection (freshest first) |
+
+Prompts are counted per session (state files under
+`~/.claude-ledger/roster-state/`, pruned after 7 days). Off-cycle prompts and
+empty rosters emit nothing — zero context cost. Stale agents and the session's
+own entry are excluded. Preview the current roster text with
+`python3 ledger_mcp.py roster`.
+
+**Automatic registration (future, currently unwired).** The SessionStart/SessionEnd hooks
 and `launch-session.sh` implement lifecycle-driven auto registration. They
 work (tested) but are deliberately not wired into settings — hooks can't see
 the session's messaging name (see "Session name resolution" below), so auto
