@@ -19,15 +19,37 @@ Code's operation depends on it.
 ```
 ledger_mcp.py              MCP server + hook helpers + CLI (single file)
 schema.sql                 agents (live state) + events (append-only audit log)
+skills/
+  register/SKILL.md            /register — in-session manual upsert (current mode)
+  deregister/SKILL.md          /deregister — in-session manual removal
 hooks/
-  session-start-register.sh    SessionStart → register
-  session-end-deregister.sh    SessionEnd → deregister
-  tmux-relabel.sh              PostToolUse → tmux window/pane label
-launch-session.sh          recommended launcher: mints name, exports it, runs claude --name
+  session-start-register.sh    SessionStart → register (auto mode, unwired)
+  session-end-deregister.sh    SessionEnd → deregister (auto mode, unwired)
+  tmux-relabel.sh              PostToolUse → tmux window/pane label (wired)
+launch-session.sh          auto-mode launcher: mints name, exports it, runs claude --name
 claude-md-snippet.md       protocol block to paste into CLAUDE.md
-examples/settings.json     hook wiring example
+examples/settings.json     hook wiring example (auto mode)
 examples/mcp.json          MCP registration example
 ```
+
+## Operating modes
+
+**Manual (current).** Registration and updates are triggered *in session* by
+the user: `/register [role / focus]` upserts this session's entry —
+resolving the session name from `$CLAUDE_LEDGER_NAME`, the conversation, or
+by asking the user, never by deriving one — and `/deregister` removes it.
+The skills live in `skills/` and are symlinked into `~/.claude/skills/`.
+Missed deregisters are harmless: stale after 10 min, evicted after 24 h.
+The PostToolUse tmux-relabel hook stays wired since it triggers off the
+in-session ledger tool calls.
+
+**Automatic (future, currently unwired).** The SessionStart/SessionEnd hooks
+and `launch-session.sh` implement lifecycle-driven auto registration. They
+work (tested) but are deliberately not wired into settings — hooks can't see
+the session's messaging name (see "Session name resolution" below), so auto
+mode depends on the launch wrapper or a first-turn self-correction protocol.
+How to trigger registration automatically and correctly is an open design
+question.
 
 ## Install
 
