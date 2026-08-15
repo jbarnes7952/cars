@@ -1,0 +1,36 @@
+{
+  "//": "Example hook wiring. Merge into ~/.claude/settings.json (user-wide) or .claude/settings.json (per project). Replace /path/to/cars with the actual checkout path.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/session-start-register.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/session-end-deregister.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__ledger__register|mcp__ledger__update_registration",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/tmux-relabel.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

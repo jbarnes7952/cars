@@ -1,0 +1,9 @@
+{
+  "//": "Example MCP registration. Save as .mcp.json in a project root, or use: claude mcp add --scope user ledger -- python3 /path/to/cars/ledger_mcp.py serve",
+  "mcpServers": {
+    "ledger": {
+      "command": "python3",
+      "args": ["/path/to/cars/ledger_mcp.py", "serve"]
+    }
+  }
+}
