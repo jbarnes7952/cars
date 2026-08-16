@@ -1,4 +1,5 @@
 # CARS — Claude Agent Registration Server (Peer Session Ledger)
+# (this is an experimental project, use with caution)
 
 A discovery directory ("DNS") for dynamic Claude Code peer sessions, served
 over MCP. Sessions register their identity, role, and capabilities; other
