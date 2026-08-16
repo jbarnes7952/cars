@@ -167,10 +167,13 @@ class LedgerTest(unittest.TestCase):
         os.environ.pop("CLAUDE_LEDGER_NAME", None)
         cwd = os.path.join(self.tmp.name, "myproj")
         os.makedirs(cwd)
+        nosocks = os.path.join(self.tmp.name, "nosocks")
+        os.makedirs(nosocks)
         proc = subprocess.run(
             [sys.executable, SERVER, "hook-register"],
             input=json.dumps({"session_id": "abcd1234-x", "cwd": cwd}),
-            capture_output=True, text=True, env=os.environ.copy(),
+            capture_output=True, text=True,
+            env=dict(os.environ, LEDGER_SOCK_DIR=nosocks),
         )
         self.assertEqual(proc.returncode, 0)
         rec = self.call("list_agents_detailed")["agents"][0]
@@ -196,6 +199,64 @@ class LedgerTest(unittest.TestCase):
             env=os.environ.copy(),
         )
         self.assertEqual(proc.returncode, 0)
+
+    def test_self_address_and_nameless_register(self):
+        sockdir = os.path.join(self.tmp.name, "socks")
+        os.makedirs(sockdir)
+        open(os.path.join(sockdir, f"{os.getppid()}.sock"), "w").close()
+        os.environ["LEDGER_SOCK_DIR"] = sockdir
+        try:
+            addr = self.ledger.self_address()
+            self.assertEqual(addr, f"uds:{sockdir}/{os.getppid()}.sock")
+            rec = self.call("register", role="tester")
+            self.assertEqual(rec["session_name"], addr)
+            self.assertEqual(rec["name_source"], "uds")
+        finally:
+            os.environ.pop("LEDGER_SOCK_DIR", None)
+
+    def test_nameless_register_errors_without_address(self):
+        nosocks = os.path.join(self.tmp.name, "nosocks2")
+        os.makedirs(nosocks)
+        os.environ["LEDGER_SOCK_DIR"] = nosocks
+        try:
+            with self.assertRaises(self.ledger.ToolError) as ctx:
+                self.call("register", role="x")
+            self.assertIn("session_name required", str(ctx.exception))
+        finally:
+            os.environ.pop("LEDGER_SOCK_DIR", None)
+
+    def test_named_register_supersedes_transport_row(self):
+        self.call("register", session_name="uds:/tmp/fake.sock",
+                  session_id="s9", role="worker")
+        self.call("register", session_name="real-name",
+                  session_id="s9", role="worker")
+        names = [a["session_name"] for a in
+                 self.call("list_agents_detailed")["agents"]]
+        self.assertIn("real-name", names)
+        self.assertNotIn("uds:/tmp/fake.sock", names)
+        ev = self.events(event="deregister",
+                         session_name="uds:/tmp/fake.sock")
+        self.assertEqual(json.loads(ev[0]["payload"])["superseded_by"],
+                         "real-name")
+
+    def test_hook_register_uds_fallback(self):
+        os.environ.pop("CLAUDE_LEDGER_NAME", None)
+        sockdir = os.path.join(self.tmp.name, "socks-hook")
+        os.makedirs(sockdir)
+        # the hook subprocess's parent is this test process
+        open(os.path.join(sockdir, f"{os.getpid()}.sock"), "w").close()
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-register"],
+            input=json.dumps({"session_id": "sid-uds", "cwd": self.tmp.name}),
+            capture_output=True, text=True,
+            env=dict(os.environ, LEDGER_SOCK_DIR=sockdir),
+        )
+        self.assertEqual(proc.returncode, 0)
+        rec = self.call("list_agents_detailed")["agents"][0]
+        self.assertEqual(rec["session_name"],
+                         f"uds:{sockdir}/{os.getpid()}.sock")
+        payload = json.loads(self.events(event="register")[0]["payload"])
+        self.assertEqual(payload["name_source"], "uds")
 
     def test_tool_prefix_env_flows_into_nudge_and_roster(self):
         self.call("register", session_name="peer-1", session_id="other")

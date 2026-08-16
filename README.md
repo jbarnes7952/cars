@@ -78,6 +78,19 @@ can't know their own `session_id`; the first heartbeat backfills it into the
 row (recorded as a `session_id_backfilled` heartbeat event), after which
 self-matching is exact.
 
+**Self-addressing (zero-touch registration).** A session usually cannot see
+its own display name (`claude --name` reaches the UI and ListAgents but is
+never injected into model context; only `/rename` produces an in-context
+notice). So `register` treats `session_name` as optional: omitted, the server
+derives the session's **transport address** — `uds:<cc-socks socket>`, found
+by walking ancestor processes — which is directly routable via SendMessage
+(field-verified) and cannot be wrong. The name is just an ID; the entry's
+value is its descriptive fields. When the session later learns its real name
+(rename notice, user tells it), it re-registers under it and any other rows
+with the same `session_id` are superseded (deleted with a
+`superseded_by` deregister event). `ledger_mcp.py self-address` prints the
+derived address; `LEDGER_SOCK_DIR` overrides the socket directory (tests).
+
 **Agents as tools (wired, on by default).** The MCP server also renders each
 fresh registered agent as a tool — `peer_<name>`, description = its routing
 card (`role — status. Ask when: <query_me_when>`) — so peers appear in the

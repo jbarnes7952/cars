@@ -15,6 +15,7 @@ Usage:
     ledger_mcp.py hook-heartbeat   activity hook helper: bump this session's
                                    last_seen (hook JSON on stdin)
     ledger_mcp.py roster           print the roster text (debug/preview)
+    ledger_mcp.py self-address     print this session's uds: transport address
     ledger_mcp.py list [--stale]   pretty-print registered agents
 
 Config (env, set in ~/.claude/settings.json "env" block):
@@ -89,12 +90,15 @@ TOOL_PREFIX = os.environ.get("LEDGER_TOOL_PREFIX", "mcp__ledger__")
 
 REGISTER_NUDGE = (
     "[ledger] This session is NOT registered in the peer directory, so peers"
-    f" cannot discover it or see when to route questions here. If this"
-    f" session's purpose is clear, register now: call {TOOL_PREFIX}register"
-    " with session_name = this session's SendMessage name (ask the user if"
-    " you don't know it), a role, a status, and query_me_when phrased as a"
-    " trigger condition ('message me when/before ...'). Keep the entry"
-    f" current with {TOOL_PREFIX}update_registration as focus shifts."
+    f" cannot discover it. Register now by calling {TOOL_PREFIX}register:"
+    " pass session_name only if you know this session's real name (a rename"
+    " notice in context counts; never guess or derive one) — otherwise OMIT"
+    " session_name and it registers under this session's transport address"
+    " automatically. Include role, status, and query_me_when phrased as a"
+    " trigger condition ('message me when/before ...'). If you learn the"
+    " real name later, re-register under it (the old entry is superseded)."
+    f" Keep the entry current with {TOOL_PREFIX}update_registration as focus"
+    " shifts."
 )
 
 AGENT_COLUMNS = [
@@ -187,7 +191,16 @@ class ToolError(Exception):
 
 
 def op_register(conn, args):
-    name = args["session_name"]
+    name = args.get("session_name") or ""
+    source = "explicit"
+    if not name:
+        name = self_address() or ""
+        source = "uds"
+    if not name:
+        raise ToolError(
+            "session_name required (no transport address derivable on this"
+            " platform); ask the user what this session should be called."
+        )
     caps = args.get("capabilities") or []
     if not isinstance(caps, list):
         caps = [str(caps)]
@@ -215,11 +228,25 @@ def op_register(conn, args):
         tuple(fields.values()),
     )
     payload = dict(fields, capabilities=caps)
-    if args.get("name_source"):
-        payload["name_source"] = args["name_source"]
+    payload["name_source"] = args.get("name_source") or source
     write_event(conn, name, fields["session_id"], "register", payload)
+    # A session upgrading from a transport address to a real name (or
+    # re-registering after a restart) supersedes its other rows.
+    sid = fields["session_id"]
+    if sid:
+        others = conn.execute(
+            "SELECT session_name FROM agents"
+            " WHERE session_id = ? AND session_name != ?", (sid, name),
+        ).fetchall()
+        for row in others:
+            conn.execute("DELETE FROM agents WHERE session_name = ?",
+                         (row["session_name"],))
+            write_event(conn, row["session_name"], sid, "deregister",
+                        {"superseded_by": name})
     conn.commit()
-    return get_record(conn, name)
+    rec = get_record(conn, name)
+    rec["name_source"] = payload["name_source"]
+    return rec
 
 
 def op_update_registration(conn, args):
@@ -336,17 +363,16 @@ CAPS = {"type": "array", "items": {"type": "string"}}
 TOOLS = [
     {
         "name": "register",
-        "description": "Register this session in the peer directory. Upserts by session_name.",
+        "description": "Register this session in the peer directory. Upserts by session_name; omit session_name to auto-register under this session's transport address.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_name": {**STR, "description": "Claude Code messaging name (the address peers use with SendMessage)"},
+                "session_name": {**STR, "description": "Messaging name peers use with SendMessage. Only pass a name you know is real (user-given or rename notice) — omit to auto-derive this session's transport address."},
                 "session_id": STR, "cwd": STR, "role": STR,
                 "capabilities": CAPS, "query_me_when": STR, "status": STR,
                 "project": STR, "tmux_pane": STR,
                 "pid": {"type": "integer"}, "name_source": STR,
             },
-            "required": ["session_name"],
         },
         "handler": op_register,
     },
@@ -609,6 +635,33 @@ def infer_project(cwd):
         probe = parent
 
 
+def self_address():
+    """This session's SendMessage transport address (uds:<socket path>).
+
+    Derived by walking ancestor processes looking for one that owns a
+    cc-socks socket — works from hooks, in-session shells, and the MCP
+    server itself (all descendants of the claude process). Returns None if
+    not derivable. LEDGER_SOCK_DIR overrides the socket directory (tests).
+    """
+    sock_dir = os.environ.get(
+        "LEDGER_SOCK_DIR", f"/run/user/{os.getuid()}/cc-socks"
+    )
+    pid = os.getppid()
+    for _ in range(20):
+        if pid <= 1:
+            return None
+        path = os.path.join(sock_dir, f"{pid}.sock")
+        if os.path.exists(path):
+            return f"uds:{path}"
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+            pid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            return None
+    return None
+
+
 def read_hook_input():
     try:
         data = json.loads(sys.stdin.read() or "{}")
@@ -625,6 +678,9 @@ def resolve_name(hook):
     title = (hook.get("session_title") or "").strip()
     if title:
         return title, "session_title"
+    addr = self_address()
+    if addr:
+        return addr, "uds"
     cwd = hook.get("cwd") or os.getcwd()
     sid = hook.get("session_id") or ""
     return f"{os.path.basename(os.path.abspath(cwd))}-{sid[:4]}", "derived"
@@ -680,6 +736,13 @@ def find_own_row(hook):
         ).fetchall()
         if len(rows) == 1:
             return row_to_record(rows[0])
+        addr = self_address()
+        if addr:
+            row = conn.execute(
+                "SELECT * FROM agents WHERE session_name = ?", (addr,)
+            ).fetchone()
+            if row:
+                return row_to_record(row)
         name, _ = resolve_name(hook)
         row = conn.execute(
             "SELECT * FROM agents WHERE session_name = ?", (name,)
@@ -849,6 +912,8 @@ def main():
             pass  # a broken roster must never block prompt submission
     elif cmd == "roster":
         print(build_roster() or "(empty roster: no fresh registered agents)")
+    elif cmd == "self-address":
+        print(self_address() or "")
     elif cmd == "list":
         cli_list("--stale" in sys.argv[2:])
     else:

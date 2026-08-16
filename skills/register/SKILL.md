@@ -14,12 +14,16 @@ The name must be the exact address peers see in `ListAgents` — it is the
 primary key of the ledger entry.
 
 Try in order:
-1. `$CLAUDE_LEDGER_NAME` (check via Bash: `echo "$CLAUDE_LEDGER_NAME"`).
-2. A session name already established in this conversation (e.g. the user told
-   you, or a prior `/register` in this session used one).
-3. Otherwise **ask the user** for the session's name (the `--name` it was
-   launched with, or what they want it called). Do not guess or derive one —
-   a wrong name breaks peer routing.
+1. A session name already established in this conversation — the user told
+   you, a rename notice appears in context ("the user named this session X"),
+   or a prior `/register` here used one.
+2. `$CLAUDE_LEDGER_NAME` (check via Bash: `echo "$CLAUDE_LEDGER_NAME"`).
+3. Otherwise **omit `session_name` entirely** — the server registers this
+   session under its self-derived transport address (`uds:...`), which is
+   directly routable via SendMessage. Never guess or invent a display name;
+   a wrong name breaks peer routing, while the transport address cannot be
+   wrong. If the real name becomes known later, re-register under it — the
+   transport-address entry is superseded automatically.
 
 ## 2. Upsert the entry
 
