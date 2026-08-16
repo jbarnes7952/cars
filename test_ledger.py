@@ -197,6 +197,22 @@ class LedgerTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0)
 
+    def test_embedded_schema_matches_file(self):
+        import re
+        def norm(sql):
+            return re.sub(r"\s+", " ", re.sub(r"--[^\n]*", "", sql)).strip()
+        with open(os.path.join(HERE, "schema.sql")) as f:
+            self.assertEqual(norm(self.ledger.SCHEMA_SQL), norm(f.read()))
+
+    def test_connect_without_schema_file(self):
+        orig = self.ledger.SCHEMA_PATH
+        self.ledger.SCHEMA_PATH = os.path.join(self.tmp.name, "missing.sql")
+        try:
+            self.call("register", session_name="no-schema-file")
+            self.assertEqual(self.call("list_agents_detailed")["count"], 1)
+        finally:
+            self.ledger.SCHEMA_PATH = orig
+
     def test_infer_project_git_root(self):
         repo = os.path.join(self.tmp.name, "repo")
         sub = os.path.join(repo, "src", "deep")

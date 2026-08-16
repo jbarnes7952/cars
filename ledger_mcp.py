@@ -41,6 +41,38 @@ DB_PATH = os.environ.get(
 )
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 
+# Embedded copy of schema.sql so the file works when distributed standalone
+# (plugin, pipx, or a bare curl of this one file). Kept in sync by a test.
+SCHEMA_SQL = """\
+CREATE TABLE IF NOT EXISTS agents (
+    session_name  TEXT PRIMARY KEY,
+    session_id    TEXT,
+    pid           INTEGER,
+    cwd           TEXT,
+    project       TEXT,
+    role          TEXT,
+    capabilities  TEXT,
+    query_me_when TEXT,
+    status        TEXT,
+    tmux_pane     TEXT,
+    machine       TEXT,
+    registered_at TEXT,
+    last_seen     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT,
+    session_name TEXT,
+    session_id   TEXT,
+    event        TEXT,
+    payload      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_session_event_ts
+    ON events (session_name, event, ts);
+"""
+
 STALE_SECONDS = 10 * 60          # older than this => flagged stale
 EVICT_SECONDS = 24 * 60 * 60     # older than this => evicted (lazily)
 HEARTBEAT_SAMPLE_SECONDS = 5 * 60  # at most one heartbeat event per session per 5 min
@@ -94,8 +126,11 @@ def connect():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    with open(SCHEMA_PATH) as f:
-        conn.executescript(f.read())
+    try:
+        with open(SCHEMA_PATH) as f:
+            conn.executescript(f.read())
+    except OSError:
+        conn.executescript(SCHEMA_SQL)
     return conn
 
 
