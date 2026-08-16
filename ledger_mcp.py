@@ -647,30 +647,66 @@ def infer_project(cwd):
         probe = parent
 
 
+def _parent_pid(pid):
+    """Portable parent-pid lookup: procfs on Linux, ps(1) elsewhere (macOS)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[1])
+    except OSError:
+        pass  # no procfs — fall through to ps
+    except (ValueError, IndexError):
+        return None
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+        return int(out.stdout.strip() or 0) or None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _sock_dirs():
+    """Candidate cc-socks directories, most specific first."""
+    env = os.environ.get("LEDGER_SOCK_DIR")
+    if env:
+        return [env] if os.path.isdir(env) else []
+    dirs = []
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        dirs.append(os.path.join(xdg, "cc-socks"))
+    dirs.append(f"/run/user/{os.getuid()}/cc-socks")
+    dirs.append(os.path.join(os.environ.get("TMPDIR", "/tmp"), "cc-socks"))
+    dirs.append("/tmp/cc-socks")
+    seen, out = set(), []
+    for d in dirs:
+        if d not in seen and os.path.isdir(d):
+            seen.add(d)
+            out.append(d)
+    return out
+
+
 def self_address():
     """This session's SendMessage transport address (uds:<socket path>).
 
     Derived by walking ancestor processes looking for one that owns a
     cc-socks socket — works from hooks, in-session shells, and the MCP
     server itself (all descendants of the claude process). Returns None if
-    not derivable. LEDGER_SOCK_DIR overrides the socket directory (tests).
+    not derivable. LEDGER_SOCK_DIR overrides the socket directory.
     """
-    sock_dir = os.environ.get(
-        "LEDGER_SOCK_DIR", f"/run/user/{os.getuid()}/cc-socks"
-    )
+    dirs = _sock_dirs()
+    if not dirs:
+        return None
     pid = os.getppid()
     for _ in range(20):
-        if pid <= 1:
+        if not pid or pid <= 1:
             return None
-        path = os.path.join(sock_dir, f"{pid}.sock")
-        if os.path.exists(path):
-            return f"uds:{path}"
-        try:
-            with open(f"/proc/{pid}/stat") as f:
-                stat = f.read()
-            pid = int(stat.rsplit(")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError):
-            return None
+        for d in dirs:
+            path = os.path.join(d, f"{pid}.sock")
+            if os.path.exists(path):
+                return f"uds:{path}"
+        pid = _parent_pid(pid)
     return None
 
 
