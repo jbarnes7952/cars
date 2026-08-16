@@ -61,8 +61,17 @@ block of `~/.claude/settings.json`:
 Prompts are counted per session (state files under
 `~/.claude-ledger/roster-state/`, pruned after 7 days). Off-cycle prompts and
 empty rosters emit nothing — zero context cost. Stale agents and the session's
-own entry are excluded. Preview the current roster text with
+own entry are excluded (matched by `session_id`, then unique `cwd`, then
+resolved name). Preview the current roster text with
 `python3 ledger_mcp.py roster`.
+
+**Register nudge (self-populating directory).** If the receiving session has
+no ledger row, the roster injection appends an instruction to register (with
+a trigger-phrased `query_me_when`), so unregistered sessions recruit
+themselves into the directory on the roster cadence. Manual registrations
+can't know their own `session_id`; the first heartbeat backfills it into the
+row (recorded as a `session_id_backfilled` heartbeat event), after which
+self-matching is exact.
 
 **Agents as tools (wired, on by default).** The MCP server also renders each
 fresh registered agent as a tool — `peer_<name>`, description = its routing
