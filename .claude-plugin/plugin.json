@@ -1,13 +1,11 @@
 {
   "name": "cars",
   "displayName": "CARS — Peer Session Ledger",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Discovery directory (DNS) for Claude Code peer sessions: register role/capabilities/status, find who to SendMessage. Directory only — never transport.",
   "author": {
     "name": "jbarnes"
   },
-  "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
   "mcpServers": {
     "ledger": {
       "command": "python3",
