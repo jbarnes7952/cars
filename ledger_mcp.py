@@ -153,16 +153,28 @@ def write_event(conn, session_name, session_id, event, payload):
 
 
 def evict_stale(conn):
-    """Lazy eviction, run at the start of every tool call."""
+    """Lazy eviction, run at the start of every tool call.
+
+    Evicts rows idle past EVICT_SECONDS, and — for same-machine agents
+    registered under a transport address — rows whose socket no longer
+    exists (the session is dead: crash, kill -9, or exit without the
+    SessionEnd hook firing)."""
+    host = socket.gethostname()
     rows = conn.execute("SELECT * FROM agents").fetchall()
     for row in rows:
+        payload = None
         if age_seconds(row["last_seen"]) > EVICT_SECONDS:
+            payload = {"last_seen": row["last_seen"]}
+        elif (row["machine"] == host
+                and (row["session_name"] or "").startswith("uds:")
+                and not os.path.exists(row["session_name"][4:])):
+            payload = {"reason": "transport-socket-gone"}
+        if payload is not None:
             conn.execute(
                 "DELETE FROM agents WHERE session_name = ?", (row["session_name"],)
             )
             write_event(
-                conn, row["session_name"], row["session_id"], "evicted",
-                {"last_seen": row["last_seen"]},
+                conn, row["session_name"], row["session_id"], "evicted", payload,
             )
     conn.commit()
 
@@ -705,9 +717,12 @@ def hook_register():
 
 
 def hook_deregister():
+    """SessionEnd hook: remove this session's own row, found the same way
+    heartbeats find it. No-op if the session never registered."""
     hook = read_hook_input()
-    name, _ = resolve_name(hook)
-    call_tool("deregister", {"session_name": name})
+    own = find_own_row(hook)
+    if own is not None:
+        call_tool("deregister", {"session_name": own["session_name"]})
 
 
 def find_own_row(hook):

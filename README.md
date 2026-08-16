@@ -27,8 +27,8 @@ hooks/
   roster-inject.sh             UserPromptSubmit → periodic peer-roster context push (wired)
   tmux-relabel.sh              PostToolUse → tmux window/pane label (wired)
   heartbeat.sh                 UserPromptSubmit/PostToolUse/Stop → bump last_seen (wired)
+  session-end-deregister.sh    SessionEnd → deregister own row (wired)
   session-start-register.sh    SessionStart → register (auto mode, unwired)
-  session-end-deregister.sh    SessionEnd → deregister (auto mode, unwired)
 launch-session.sh          auto-mode launcher: mints name, exports it, runs claude --name
 claude-md-snippet.md       protocol block to paste into CLAUDE.md
 examples/settings.json     hook wiring example (auto mode)
@@ -204,6 +204,20 @@ Priority order:
 - `last_seen` > 24 h ⇒ evicted (row deleted, `evicted` event written).
   Eviction runs lazily on every tool call — no background daemon.
 - Any tool call carrying a `session_name` bumps that session's `last_seen`.
+
+Departure cleanup, in layers:
+
+1. **SessionEnd → deregister (wired):** on clean exit the hook finds the
+   session's own row (same matching as heartbeats: `session_id` → unique
+   `cwd` → transport address → resolved name) and removes it. No-op for
+   unregistered sessions.
+2. **Dead-transport eviction:** for same-machine agents registered under a
+   `uds:` address, any tool call checks whether the socket still exists; if
+   not, the row is evicted immediately (`evicted` event, reason
+   `transport-socket-gone`) — covers crashes and kill -9, which never fire
+   SessionEnd.
+3. **24 h idle eviction:** the backstop for named rows with no working
+   liveness signal.
 
 To keep active sessions fresh, wire `hooks/heartbeat.sh` into the
 UserPromptSubmit, PostToolUse, and Stop events (async, timeout 10). It calls

@@ -55,6 +55,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-end-deregister.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

@@ -225,19 +225,61 @@ class LedgerTest(unittest.TestCase):
         finally:
             os.environ.pop("LEDGER_SOCK_DIR", None)
 
+    def _fake_uds(self, basename):
+        # a live-looking transport address: the backing path must exist or
+        # dead-transport eviction removes the row on the next tool call
+        path = os.path.join(self.tmp.name, basename)
+        open(path, "w").close()
+        return f"uds:{path}", path
+
     def test_named_register_supersedes_transport_row(self):
-        self.call("register", session_name="uds:/tmp/fake.sock",
+        addr, _ = self._fake_uds("live.sock")
+        self.call("register", session_name=addr,
                   session_id="s9", role="worker")
         self.call("register", session_name="real-name",
                   session_id="s9", role="worker")
         names = [a["session_name"] for a in
                  self.call("list_agents_detailed")["agents"]]
         self.assertIn("real-name", names)
-        self.assertNotIn("uds:/tmp/fake.sock", names)
-        ev = self.events(event="deregister",
-                         session_name="uds:/tmp/fake.sock")
+        self.assertNotIn(addr, names)
+        ev = self.events(event="deregister", session_name=addr)
         self.assertEqual(json.loads(ev[0]["payload"])["superseded_by"],
                          "real-name")
+
+    def test_dead_transport_evicted_immediately(self):
+        addr, path = self._fake_uds("dying.sock")
+        self.call("register", session_name=addr, role="worker")
+        self.assertEqual(self.call("list_agents_detailed")["count"], 1)
+        os.unlink(path)  # session dies without SessionEnd (kill -9)
+        self.assertEqual(self.call("list_agents_detailed")["count"], 0)
+        ev = self.events(event="evicted", session_name=addr)
+        self.assertEqual(json.loads(ev[0]["payload"])["reason"],
+                         "transport-socket-gone")
+
+    def test_hook_deregister_matches_own_row_by_cwd(self):
+        os.environ.pop("CLAUDE_LEDGER_NAME", None)
+        cwd = os.path.join(self.tmp.name, "own-cwd")
+        os.makedirs(cwd)
+        nosocks = os.path.join(self.tmp.name, "nosocks3")
+        os.makedirs(nosocks)
+        self.call("register", session_name="custom-name", cwd=cwd)
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-deregister"],
+            input=json.dumps({"session_id": "unknown-sid", "cwd": cwd}),
+            capture_output=True, text=True,
+            env=dict(os.environ, LEDGER_SOCK_DIR=nosocks),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(self.call("list_agents_detailed")["count"], 0)
+        # and an unregistered session's SessionEnd is a clean no-op
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-deregister"],
+            input=json.dumps({"session_id": "ghost", "cwd": nosocks}),
+            capture_output=True, text=True,
+            env=dict(os.environ, LEDGER_SOCK_DIR=nosocks),
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(len(self.events(event="deregister")), 1)
 
     def test_hook_register_uds_fallback(self):
         os.environ.pop("CLAUDE_LEDGER_NAME", None)
