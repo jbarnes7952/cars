@@ -114,9 +114,9 @@ with no path editing.
 # from a local checkout
 claude plugin install /path/to/cars
 
-# or, once pushed to a git host, via the bundled marketplace
-# (.claude-plugin/marketplace.json):
-/plugin marketplace add <owner>/cars
+# or via the bundled marketplace (.claude-plugin/marketplace.json);
+# repo is currently private, so the machine needs GitHub auth:
+/plugin marketplace add jbarnes7952/cars
 /plugin install cars@cars
 ```
 
