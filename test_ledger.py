@@ -310,6 +310,27 @@ class LedgerTest(unittest.TestCase):
         ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(sum(1 for l in ctx.splitlines() if l.startswith("- ")), 2)
 
+    def test_roster_tool_call_cadence(self):
+        self.call("register", session_name="peer-1", session_id="other")
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="5",
+                   LEDGER_ROSTER_TOOLS_EVERY="3")
+        def run(event):
+            proc = subprocess.run(
+                [sys.executable, SERVER, "hook-roster"],
+                input=json.dumps({"session_id": "sess-t", "cwd": "/nope",
+                                  "hook_event_name": event}),
+                capture_output=True, text=True, env=env)
+            self.assertEqual(proc.returncode, 0)
+            return proc.stdout.strip()
+        first = json.loads(run("PostToolUse"))     # first event: fires
+        self.assertEqual(first["hookSpecificOutput"]["hookEventName"],
+                         "PostToolUse")
+        self.assertEqual(run("PostToolUse"), "")       # t=1
+        self.assertEqual(run("UserPromptSubmit"), "")  # p=1
+        self.assertEqual(run("PostToolUse"), "")       # t=2
+        self.assertNotEqual(run("PostToolUse"), "")    # t=3 → fires, resets both
+        self.assertEqual(run("UserPromptSubmit"), "")  # p back to 1 after reset
+
     # -------------------------------------------------------------- agent tools
 
     def _stdio(self, msgs, **env_extra):

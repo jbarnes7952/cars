@@ -55,8 +55,12 @@ block of `~/.claude/settings.json`:
 
 | var | default | meaning |
 |---|---|---|
-| `LEDGER_ROSTER_EVERY` | `5` | inject on the first prompt of a session, then every Nth prompt; `1` = every prompt, `0` = off |
+| `LEDGER_ROSTER_EVERY` | `5` | inject on the first event of a session, then every Nth prompt; `1` = every prompt, `0` = off |
+| `LEDGER_ROSTER_TOOLS_EVERY` | `25` | also inject every Nth *tool call* (hook wired to PostToolUse) — reaches autonomous sessions that rarely see user prompts; `0` = off |
 | `LEDGER_ROSTER_MAX` | `15` | max agents per injection (freshest first) |
+
+The two cadences share one counter file; a firing on either channel resets
+both, so a chatty session never gets double-injected.
 
 Prompts are counted per session (state files under
 `~/.claude-ledger/roster-state/`, pruned after 7 days). Off-cycle prompts and

@@ -19,6 +19,8 @@ Usage:
 
 Config (env, set in ~/.claude/settings.json "env" block):
     LEDGER_ROSTER_EVERY  roster push every N prompts (default 5; 1=every, 0=off)
+    LEDGER_ROSTER_TOOLS_EVERY  roster push every N tool calls, for autonomous
+                         sessions that rarely see user prompts (default 25; 0=off)
     LEDGER_ROSTER_MAX    max agents per roster push / per tool list (default 15)
     LEDGER_AGENT_TOOLS   expose each fresh agent as an MCP tool (default 1; 0=off)
     LEDGER_TOOLS_POLL    seconds between registry polls for tools/list_changed
@@ -43,6 +45,7 @@ STALE_SECONDS = 10 * 60          # older than this => flagged stale
 EVICT_SECONDS = 24 * 60 * 60     # older than this => evicted (lazily)
 HEARTBEAT_SAMPLE_SECONDS = 5 * 60  # at most one heartbeat event per session per 5 min
 ROSTER_EVERY_DEFAULT = 5           # inject roster every N prompts (env LEDGER_ROSTER_EVERY)
+ROSTER_TOOLS_EVERY_DEFAULT = 25    # inject every N tool calls (env LEDGER_ROSTER_TOOLS_EVERY)
 ROSTER_MAX_DEFAULT = 15            # max agents per roster (env LEDGER_ROSTER_MAX)
 ROSTER_STATE_MAX_AGE = 7 * 24 * 3600  # prune per-session counters older than this
 
@@ -698,16 +701,24 @@ def _roster_state_dir():
 
 
 def hook_roster():
-    """UserPromptSubmit hook: emit roster as additionalContext every N prompts.
+    """Roster/nudge injection on a dual cadence.
 
-    Fires on the first prompt of a session, then every LEDGER_ROSTER_EVERY
-    prompts (counted per session_id). 0 disables. Prints nothing on off-cycle
-    prompts or when the roster is empty.
+    Wired to both UserPromptSubmit and PostToolUse (event read from stdin
+    hook_event_name). Fires on the first event of a session, then every
+    LEDGER_ROSTER_EVERY prompts or every LEDGER_ROSTER_TOOLS_EVERY tool calls
+    — whichever threshold is reached first; firing resets both counters so
+    the two channels never double-inject. The tool-call channel is what
+    reaches autonomous sessions that rarely see user prompts. 0 disables a
+    channel. Prints nothing off-cycle or when there is nothing to say.
     """
-    every = _env_int("LEDGER_ROSTER_EVERY", ROSTER_EVERY_DEFAULT)
+    hook = read_hook_input()
+    event = hook.get("hook_event_name") or "UserPromptSubmit"
+    is_tool = event == "PostToolUse"
+    every = (_env_int("LEDGER_ROSTER_TOOLS_EVERY", ROSTER_TOOLS_EVERY_DEFAULT)
+             if is_tool else
+             _env_int("LEDGER_ROSTER_EVERY", ROSTER_EVERY_DEFAULT))
     if every <= 0:
         return
-    hook = read_hook_input()
     sid = (hook.get("session_id") or "unknown").replace(os.sep, "_")
     state_dir = _roster_state_dir()
     os.makedirs(state_dir, exist_ok=True)
@@ -717,13 +728,15 @@ def hook_roster():
     if os.path.exists(state_path):
         try:
             with open(state_path) as f:
-                count = int(f.read().strip() or 0)
+                raw = json.loads(f.read().strip() or "0")
+            state = raw if isinstance(raw, dict) else {"p": int(raw), "t": 0}
         except (ValueError, OSError):
-            count = 0
-        count += 1
-        fire = count >= every
+            state = {"p": 0, "t": 0}
+        key = "t" if is_tool else "p"
+        state[key] = int(state.get(key, 0)) + 1
+        fire = state[key] >= every
     with open(state_path, "w") as f:
-        f.write("0" if fire else str(count))
+        f.write(json.dumps({"p": 0, "t": 0} if fire else state))
 
     # Opportunistic prune of counters from long-dead sessions.
     try:
@@ -748,7 +761,7 @@ def hook_roster():
     if parts:
         print(json.dumps({
             "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
+                "hookEventName": event,
                 "additionalContext": "\n\n".join(parts),
             }
         }))

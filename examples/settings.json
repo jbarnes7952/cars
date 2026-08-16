@@ -2,6 +2,7 @@
   "//": "Example hook wiring. Merge into ~/.claude/settings.json (user-wide) or .claude/settings.json (per project). Replace /path/to/cars with the actual checkout path. Current mode wires UserPromptSubmit (periodic roster push + heartbeat) + PostToolUse (tmux relabel + heartbeat) + Stop (heartbeat).",
   "env": {
     "LEDGER_ROSTER_EVERY": "5",
+    "LEDGER_ROSTER_TOOLS_EVERY": "25",
     "LEDGER_ROSTER_MAX": "15"
   },
   "hooks": {
@@ -33,6 +34,15 @@
           {
             "type": "command",
             "command": "/path/to/cars/hooks/tmux-relabel.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/cars/hooks/roster-inject.sh",
             "timeout": 10
           }
         ]
