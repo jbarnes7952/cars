@@ -6,6 +6,11 @@
 [ -n "$TMUX" ] || exit 0
 [ -n "$TMUX_PANE" ] || exit 0
 
+# Hook environments can have a lean PATH; resolve tmux with a fallback.
+TMUX_BIN=$(command -v tmux || true)
+[ -n "$TMUX_BIN" ] || TMUX_BIN=/usr/bin/tmux
+[ -x "$TMUX_BIN" ] || exit 0
+
 PROJECT=$(python3 -c '
 import json, sys
 try:
@@ -18,9 +23,9 @@ except Exception:
 [ -n "$PROJECT" ] || exit 0
 
 if [ "${LEDGER_TMUX_MODE:-window}" = "pane" ]; then
-    tmux select-pane -t "$TMUX_PANE" -T "$PROJECT" 2>/dev/null || true
+    "$TMUX_BIN" select-pane -t "$TMUX_PANE" -T "$PROJECT" 2>/dev/null || true
 else
-    tmux rename-window -t "$TMUX_PANE" "$PROJECT" 2>/dev/null || true
-    tmux set-option -w -t "$TMUX_PANE" automatic-rename off 2>/dev/null || true
+    "$TMUX_BIN" rename-window -t "$TMUX_PANE" "$PROJECT" 2>/dev/null || true
+    "$TMUX_BIN" set-option -w -t "$TMUX_PANE" automatic-rename off 2>/dev/null || true
 fi
 exit 0
