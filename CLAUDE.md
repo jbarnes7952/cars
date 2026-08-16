@@ -47,3 +47,17 @@ session — the name is its address.
   `~/.claude.json` (`mcpServers.ledger`); `examples/` must mirror it with
   `/path/to/cars` placeholders.
 - Update `README.md` in the same commit as any behavior change.
+
+## Releases
+
+This machine runs CARS as an installed plugin (`cars@cars`, directory
+marketplace at this repo) — sessions execute the **plugin cache copy**, not
+this working tree. Edits here do nothing to the fleet until released:
+
+1. Tests pass (`python3 test_ledger.py`).
+2. Bump `version` in `.claude-plugin/plugin.json` AND
+   `.claude-plugin/marketplace.json` in the same commit as the change.
+3. Commit, then `claude plugin update cars` to roll the fleet forward.
+
+To try uncommitted work live without releasing: `claude --plugin-dir .` in a
+scratch session.
