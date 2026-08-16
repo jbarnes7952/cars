@@ -197,6 +197,19 @@ class LedgerTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0)
 
+    def test_tool_prefix_env_flows_into_nudge_and_roster(self):
+        self.call("register", session_name="peer-1", session_id="other")
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="1",
+                   LEDGER_TOOL_PREFIX="mcp__plugin_cars_ledger__")
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": "sess-p", "cwd": "/nope"}),
+            capture_output=True, text=True, env=env)
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("mcp__plugin_cars_ledger__find_agents", ctx)
+        self.assertIn("mcp__plugin_cars_ledger__register", ctx)  # nudge
+        self.assertNotIn("mcp__ledger__", ctx.replace("mcp__plugin_cars_ledger__", ""))
+
     def test_embedded_schema_matches_file(self):
         import re
         def norm(sql):

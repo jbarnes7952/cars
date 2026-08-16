@@ -104,7 +104,35 @@ mode depends on the launch wrapper or a first-turn self-correction protocol.
 How to trigger registration automatically and correctly is an open design
 question.
 
-## Install
+## Install as a plugin (recommended)
+
+The repo is a Claude Code plugin: one install wires the MCP server, all
+current-mode hooks (roster/nudge, heartbeat, tmux relabel), and the skills,
+with no path editing.
+
+```bash
+# from a local checkout
+claude plugin install /path/to/cars
+
+# or, once pushed to a git host, via the bundled marketplace
+# (.claude-plugin/marketplace.json):
+/plugin marketplace add <owner>/cars
+/plugin install cars@cars
+```
+
+Plugin installs differ from manual installs in two visible ways:
+
+- **Tool names** become `mcp__plugin_cars_ledger__*` instead of
+  `mcp__ledger__*`. The plugin manifest sets `LEDGER_TOOL_PREFIX` so the
+  roster/nudge text and hook matchers use the right names automatically.
+- **Skills** surface as `/cars:register` and `/cars:deregister`.
+
+Do not combine plugin install with the manual hook/MCP wiring below — you'd
+get duplicate injections and heartbeats. Pick one mode; remove the manual
+`ledger` entries from `~/.claude/settings.json` and `~/.claude.json` when
+switching to the plugin.
+
+## Manual install
 
 1. Clone anywhere, e.g. `~/tools/cars`. Make scripts executable:
 

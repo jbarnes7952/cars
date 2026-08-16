@@ -81,14 +81,20 @@ ROSTER_TOOLS_EVERY_DEFAULT = 25    # inject every N tool calls (env LEDGER_ROSTE
 ROSTER_MAX_DEFAULT = 15            # max agents per roster (env LEDGER_ROSTER_MAX)
 ROSTER_STATE_MAX_AGE = 7 * 24 * 3600  # prune per-session counters older than this
 
+# Tool-name prefix as surfaced to sessions. Standalone MCP registration
+# yields mcp__ledger__*; installed as the cars plugin it becomes
+# mcp__plugin_cars_ledger__* (set via LEDGER_TOOL_PREFIX in the plugin
+# manifest so nudge/roster text names tools the session can actually see).
+TOOL_PREFIX = os.environ.get("LEDGER_TOOL_PREFIX", "mcp__ledger__")
+
 REGISTER_NUDGE = (
     "[ledger] This session is NOT registered in the peer directory, so peers"
-    " cannot discover it or see when to route questions here. If this"
-    " session's purpose is clear, register now: call mcp__ledger__register"
+    f" cannot discover it or see when to route questions here. If this"
+    f" session's purpose is clear, register now: call {TOOL_PREFIX}register"
     " with session_name = this session's SendMessage name (ask the user if"
     " you don't know it), a role, a status, and query_me_when phrased as a"
     " trigger condition ('message me when/before ...'). Keep the entry"
-    " current with mcp__ledger__update_registration as focus shifts."
+    f" current with {TOOL_PREFIX}update_registration as focus shifts."
 )
 
 AGENT_COLUMNS = [
@@ -548,7 +554,7 @@ def serve():
                     "protocolVersion", "2025-06-18"
                 ),
                 "capabilities": {"tools": {"listChanged": True}},
-                "serverInfo": {"name": "ledger", "version": "1.0.0"},
+                "serverInfo": {"name": "ledger", "version": "1.1.0"},
             })
         elif method == "ping":
             rpc_response(msg_id, {})
@@ -725,7 +731,7 @@ def build_roster(exclude_session_id="", exclude_name=""):
         "[ledger] Active peer Claude sessions on this machine. Before making "
         "changes to a project listed here, consider coordinating with its agent "
         "first (SendMessage to the name below — e.g. a question or a requirements "
-        "spec). Details: mcp__ledger__find_agents. The ledger is a directory, "
+        f"spec). Details: {TOOL_PREFIX}find_agents. The ledger is a directory, "
         "never a message channel."
     )
     return header + "\n" + "\n".join(lines)

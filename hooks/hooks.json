@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "LEDGER_TOOL_PREFIX=mcp__plugin_cars_ledger__ \"${CLAUDE_PLUGIN_ROOT}/hooks/roster-inject.sh\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat.sh\"",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_cars_ledger__register|mcp__plugin_cars_ledger__update_registration",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/tmux-relabel.sh\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "LEDGER_TOOL_PREFIX=mcp__plugin_cars_ledger__ \"${CLAUDE_PLUGIN_ROOT}/hooks/roster-inject.sh\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat.sh\"",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat.sh\"",
+            "timeout": 10,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

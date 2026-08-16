@@ -23,14 +23,17 @@ Try in order:
 
 ## 2. Upsert the entry
 
-Check `mcp__ledger__list_agents_detailed` (`include_stale: true`) for an
-existing row under that name.
+Use the `ledger` MCP server's tools (named `mcp__ledger__*` when registered
+manually, `mcp__plugin_cars_ledger__*` when installed as the cars plugin —
+use whichever form appears in your tool list).
 
-- **No row** → `mcp__ledger__register` with: `session_name`, `cwd` (current
-  working directory), `project` (basename of the git repo root, else of cwd),
+Check `list_agents_detailed` (`include_stale: true`) for an existing row
+under that name.
+
+- **No row** → `register` with: `session_name`, `cwd` (current working
+  directory), `project` (basename of the git repo root, else of cwd),
   and `role`, `capabilities`, `query_me_when`, `status`.
-- **Row exists** → `mcp__ledger__update_registration` with only the fields
-  that changed.
+- **Row exists** → `update_registration` with only the fields that changed.
 
 Fill the descriptive fields from `$ARGUMENTS` first, then from conversation
 context (what is this session actually working on?). If the session's purpose
