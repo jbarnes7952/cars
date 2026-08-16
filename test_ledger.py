@@ -251,7 +251,52 @@ class LedgerTest(unittest.TestCase):
         self.call("register", session_name="peer-1", session_id="other")
         self.assertEqual(self._roster_hook(every="0"), "")  # disabled
         self.call("deregister", session_name="peer-1")
-        self.assertEqual(self._roster_hook(session_id="sess-b"), "")  # empty
+        # empty roster + unregistered session => nudge-only injection
+        out = self._roster_hook(session_id="sess-b")
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("NOT registered", ctx)
+        self.assertNotIn("- ", ctx)
+
+    def test_roster_nudge_and_cwd_self_match(self):
+        # unregistered session gets the nudge appended after the roster
+        self.call("register", session_name="peer-1", session_id="other")
+        ctx = json.loads(self._roster_hook(session_id="sess-x"))[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("peer-1", ctx)
+        self.assertIn("NOT registered", ctx)
+        # a manual registration (no session_id) matched by cwd counts as
+        # registered: excluded from roster, no nudge
+        cwd = os.path.join(self.tmp.name, "workdir")
+        os.makedirs(cwd)
+        self.call("register", session_name="manual-me", cwd=cwd)
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="1")
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": "sess-y", "cwd": cwd}),
+            capture_output=True, text=True, env=env,
+        )
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("peer-1", ctx)
+        self.assertNotIn("manual-me", ctx)
+        self.assertNotIn("NOT registered", ctx)
+
+    def test_heartbeat_hook_backfills_session_id(self):
+        cwd = os.path.join(self.tmp.name, "hbdir")
+        os.makedirs(cwd)
+        self.call("register", session_name="manual-hb", cwd=cwd)
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-heartbeat"],
+            input=json.dumps({"session_id": "sid-backfill", "cwd": cwd}),
+            capture_output=True, text=True, env=os.environ.copy(),
+        )
+        self.assertEqual(proc.returncode, 0)
+        rec = self.call("list_agents_detailed")["agents"]
+        rec = [a for a in rec if a["session_name"] == "manual-hb"][0]
+        self.assertEqual(rec["session_id"], "sid-backfill")
+        events = self.events(event="heartbeat", session_name="manual-hb")
+        self.assertEqual(
+            json.loads(events[0]["payload"])["session_id_backfilled"],
+            "sid-backfill")
 
     def test_roster_max_cap(self):
         for i in range(5):

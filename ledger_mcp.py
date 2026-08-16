@@ -46,6 +46,16 @@ ROSTER_EVERY_DEFAULT = 5           # inject roster every N prompts (env LEDGER_R
 ROSTER_MAX_DEFAULT = 15            # max agents per roster (env LEDGER_ROSTER_MAX)
 ROSTER_STATE_MAX_AGE = 7 * 24 * 3600  # prune per-session counters older than this
 
+REGISTER_NUDGE = (
+    "[ledger] This session is NOT registered in the peer directory, so peers"
+    " cannot discover it or see when to route questions here. If this"
+    " session's purpose is clear, register now: call mcp__ledger__register"
+    " with session_name = this session's SendMessage name (ask the user if"
+    " you don't know it), a role, a status, and query_me_when phrased as a"
+    " trigger condition ('message me when/before ...'). Keep the entry"
+    " current with mcp__ledger__update_registration as focus shifts."
+)
+
 AGENT_COLUMNS = [
     "session_name", "session_id", "pid", "cwd", "project", "role",
     "capabilities", "query_me_when", "status", "tmux_pane", "machine",
@@ -203,22 +213,35 @@ def op_update_registration(conn, args):
 
 def op_heartbeat(conn, args):
     name = args["session_name"]
+    sid = args.get("session_id") or ""
     now = now_iso()
     cur = conn.execute(
         "UPDATE agents SET last_seen = ? WHERE session_name = ?", (now, name)
     )
     if cur.rowcount:
-        # Sample heartbeat events: at most one per session per 5 minutes.
+        row = conn.execute(
+            "SELECT session_id FROM agents WHERE session_name = ?", (name,)
+        ).fetchone()
+        # Manual registrations don't know their session_id; backfill it from
+        # the hook so self-matching (roster nudge, exclusion) becomes exact.
+        backfilled = bool(sid and not row["session_id"])
+        if backfilled:
+            conn.execute(
+                "UPDATE agents SET session_id = ? WHERE session_name = ?",
+                (sid, name),
+            )
+        # Sample heartbeat events: at most one per session per 5 minutes
+        # (a backfill always writes one, so the audit log records it).
         last = conn.execute(
             "SELECT MAX(ts) AS ts FROM events"
             " WHERE session_name = ? AND event = 'heartbeat'",
             (name,),
         ).fetchone()["ts"]
-        if last is None or age_seconds(last) > HEARTBEAT_SAMPLE_SECONDS:
-            row = conn.execute(
-                "SELECT session_id FROM agents WHERE session_name = ?", (name,)
-            ).fetchone()
-            write_event(conn, name, row["session_id"], "heartbeat", {"last_seen": now})
+        if backfilled or last is None or age_seconds(last) > HEARTBEAT_SAMPLE_SECONDS:
+            payload = {"last_seen": now}
+            if backfilled:
+                payload["session_id_backfilled"] = sid
+            write_event(conn, name, sid or row["session_id"], "heartbeat", payload)
     conn.commit()
     return {"session_name": name, "registered": bool(cur.rowcount), "last_seen": now}
 
@@ -301,7 +324,7 @@ TOOLS = [
         "description": "Mark this session as still alive (bumps last_seen).",
         "inputSchema": {
             "type": "object",
-            "properties": {"session_name": STR},
+            "properties": {"session_name": STR, "session_id": STR},
             "required": ["session_name"],
         },
         "handler": op_heartbeat,
@@ -587,39 +610,54 @@ def hook_deregister():
     call_tool("deregister", {"session_name": name})
 
 
-def hook_heartbeat():
-    """Bump last_seen for the ledger row belonging to this session.
+def find_own_row(hook):
+    """Best-effort match of this session to its ledger row.
 
     A manually /register-ed session may use a name unrelated to the derived
     one and carry no session_id, so match by session_id first, then by unique
     cwd (session-per-worktree makes cwd a good key), then by resolved name.
+    Returns the record dict or None.
     """
-    hook = read_hook_input()
     sid = hook.get("session_id") or ""
     cwd = hook.get("cwd") or os.getcwd()
-    name = None
-    conn = connect()
+    try:
+        conn = connect()
+    except Exception:
+        return None
     try:
         if sid:
             row = conn.execute(
-                "SELECT session_name FROM agents WHERE session_id = ?", (sid,)
+                "SELECT * FROM agents WHERE session_id = ?", (sid,)
             ).fetchone()
             if row:
-                name = row["session_name"]
-        if name is None:
-            rows = conn.execute(
-                "SELECT session_name FROM agents WHERE cwd = ?", (cwd,)
-            ).fetchall()
-            if len(rows) == 1:
-                name = rows[0]["session_name"]
+                return row_to_record(row)
+        rows = conn.execute(
+            "SELECT * FROM agents WHERE cwd = ?", (cwd,)
+        ).fetchall()
+        if len(rows) == 1:
+            return row_to_record(rows[0])
+        name, _ = resolve_name(hook)
+        row = conn.execute(
+            "SELECT * FROM agents WHERE session_name = ?", (name,)
+        ).fetchone()
+        return row_to_record(row) if row else None
     finally:
         conn.close()
-    if name is None:
-        name, _ = resolve_name(hook)
-    call_tool("heartbeat", {"session_name": name})
 
 
-def build_roster(exclude_session_id=""):
+def hook_heartbeat():
+    """Bump last_seen for the ledger row belonging to this session (and let
+    op_heartbeat backfill session_id on first match). No-op if this session
+    has no row — the roster nudge handles getting it registered."""
+    hook = read_hook_input()
+    own = find_own_row(hook)
+    if own is None:
+        return
+    call_tool("heartbeat", {"session_name": own["session_name"],
+                            "session_id": hook.get("session_id") or ""})
+
+
+def build_roster(exclude_session_id="", exclude_name=""):
     """Compact peer roster for context injection. Empty string if no fresh peers."""
     conn = connect()
     try:
@@ -634,6 +672,8 @@ def build_roster(exclude_session_id=""):
         if rec["stale"]:
             continue
         if exclude_session_id and rec["session_id"] == exclude_session_id:
+            continue
+        if exclude_name and rec["session_name"] == exclude_name:
             continue
         desc = " — ".join(x for x in (rec["role"], rec["status"]) if x)
         proj = f" [{rec['project']}]" if rec["project"] else ""
@@ -697,12 +737,19 @@ def hook_roster():
 
     if not fire:
         return
-    roster = build_roster(exclude_session_id=hook.get("session_id") or "")
-    if roster:
+    own = find_own_row(hook)
+    roster = build_roster(
+        exclude_session_id=hook.get("session_id") or "",
+        exclude_name=own["session_name"] if own else "",
+    )
+    parts = [p for p in (roster,) if p]
+    if own is None:
+        parts.append(REGISTER_NUDGE)
+    if parts:
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": roster,
+                "additionalContext": "\n\n".join(parts),
             }
         }))
 
