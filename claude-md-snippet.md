@@ -6,14 +6,16 @@ This machine runs a session directory (the `ledger` MCP server). It tells you
 **who** to message; native `SendMessage` does the messaging.
 
 1. **Register early.** Once this session's purpose is clear (usually the first
-   real prompt), call the ledger server's `register` tool with `role`,
-   `status`, `project`, and `query_me_when` written as a **trigger condition**
-   ("message me when/before ...", naming specific files or operations) — it is
-   rendered verbatim as your tool description for peers. Pass `session_name`
-   only if you actually know it (user-given or a rename notice in context —
-   never guess one); otherwise omit it and you are registered under this
-   session's self-derived transport address. Learn the real name later →
-   re-register under it (the old entry is superseded).
+   real prompt): if the user is actively present, ask them once — briefly —
+   whether to add this session to the registry, proposing the `role` and a
+   `query_me_when` written as a **trigger condition** ("message me
+   when/before ...", naming specific files or operations — it is rendered
+   verbatim as your tool description for peers); register on approval and
+   never re-ask after a decline. If running unattended, register without
+   asking. Pass `session_name` only if you actually know it (user-given or a
+   rename notice in context — never guess one); otherwise omit it and you are
+   registered under this session's self-derived transport address. Learn the
+   real name later → re-register under it (the old entry is superseded).
 2. **Keep it current.** Call `mcp__ledger__update_registration` when focus
    meaningfully shifts; the tmux label follows `project`. Never `/rename` a
    registered session — the name is its address.

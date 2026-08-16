@@ -90,18 +90,19 @@ TOOL_PREFIX = os.environ.get("LEDGER_TOOL_PREFIX", "mcp__ledger__")
 
 REGISTER_NUDGE = (
     "[ledger] This session is NOT registered in the peer directory, so peers"
-    " cannot discover it. If this session's role/scope is already clear from"
-    " the user's message or context, register as your FIRST action — one"
-    f" {TOOL_PREFIX}register call before starting the actual work; if it"
-    " isn't clear yet, proceed and register the moment it becomes clear (do"
-    " not ask the user just to register). Pass session_name only if you know"
-    " this session's real name (a rename notice in context counts; never"
-    " guess or derive one) — otherwise OMIT session_name and it registers"
-    " under this session's transport address automatically. Include role,"
-    " status, and query_me_when phrased as a trigger condition ('message me"
-    " when/before ...'). If you learn the real name later, re-register under"
-    f" it (the old entry is superseded). Keep the entry current with"
-    f" {TOOL_PREFIX}update_registration as focus shifts."
+    " cannot discover it. Once this session's role/scope is clear (often"
+    " from the user's first message): if a user is actively present in this"
+    " conversation, ask them ONCE — briefly, alongside your reply or via the"
+    " question tool — whether to add this session to the registry, proposing"
+    " the role and a trigger-phrased query_me_when ('message me when/before"
+    f" ...'); on approval call {TOOL_PREFIX}register immediately, and never"
+    " re-ask after a decline. If this session is running unattended,"
+    " register without asking. Pass session_name only if you know this"
+    " session's real name (a rename notice in context counts; never guess or"
+    " derive one) — otherwise OMIT session_name and it registers under this"
+    " session's transport address automatically. If you learn the real name"
+    " later, re-register under it (the old entry is superseded). Keep the"
+    f" entry current with {TOOL_PREFIX}update_registration as focus shifts."
 )
 
 AGENT_COLUMNS = [
