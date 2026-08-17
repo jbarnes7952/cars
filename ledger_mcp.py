@@ -26,6 +26,9 @@ Config (env, set in ~/.claude/settings.json "env" block):
     LEDGER_AGENT_TOOLS   expose each fresh agent as an MCP tool (default 1; 0=off)
     LEDGER_TOOLS_POLL    seconds between registry polls for tools/list_changed
                          notifications (default 20; 0=off)
+    LEDGER_ALWAYS_LOAD   exempt tools from client-side schema deferral via
+                         _meta anthropic/alwaysLoad: none (default) | core
+                         (the six static tools) | all (peer_* tools too)
 """
 
 import json
@@ -88,6 +91,33 @@ ROSTER_STATE_MAX_AGE = 7 * 24 * 3600  # prune per-session counters older than th
 # manifest so nudge/roster text names tools the session can actually see).
 TOOL_PREFIX = os.environ.get("LEDGER_TOOL_PREFIX", "mcp__ledger__")
 
+# Sent in the MCP initialize response. Instructions persist in the model's
+# context even when tool schemas are deferred, so this is the always-visible
+# routing layer: what the server covers and the vocabulary→tool-name mapping
+# that makes deferred-tool searches succeed. Keep critical content first;
+# clients may truncate around 2KB.
+SERVER_INSTRUCTIONS = (
+    "Peer-session directory (ledger) for the Claude Code sessions on this"
+    " machine. Consult it BEFORE modifying a project another session may own,"
+    " when choosing who to route a question to, or when delegating work."
+    " Directory only: message peers via native SendMessage — the ledger never"
+    " transports messages. Tools (schemas may be deferred; load by exact name"
+    " via ToolSearch): register, update_registration, find_agents,"
+    " list_agents_detailed, heartbeat, deregister. Each active peer session"
+    " also appears as a tool named peer_<session>__<role-slug>; calling it"
+    " returns that peer's contact card (who they are, when to message them)."
+    " Registration: once this session's purpose is clear, ask an attended"
+    " user once before registering (register without asking if unattended);"
+    " omit session_name to register under this session's transport address."
+    " The periodically injected [ledger] roster block is the authoritative"
+    " live peer list."
+)
+
+def deferral_active():
+    """Tool-schema deferral is Claude Code's default; only an explicit
+    ENABLE_TOOL_SEARCH=false guarantees eager loading."""
+    return os.environ.get("ENABLE_TOOL_SEARCH", "").strip().lower() != "false"
+
 REGISTER_NUDGE = (
     "[ledger] This session is NOT registered in the peer directory, so peers"
     " cannot discover it. Once this session's role/scope is clear (often"
@@ -103,6 +133,9 @@ REGISTER_NUDGE = (
     " session's transport address automatically. If you learn the real name"
     " later, re-register under it (the old entry is superseded). Keep the"
     f" entry current with {TOOL_PREFIX}update_registration as focus shifts."
+    " If ledger tools appear name-only (schemas deferred), load them via"
+    " ToolSearch by exact name first; manual fallback: the /cars:register"
+    " skill."
 )
 
 AGENT_COLUMNS = [
@@ -457,8 +490,24 @@ def _env_int(name, default):
         return default
 
 
-def _peer_tool_name(session_name):
-    return "peer_" + re.sub(r"[^A-Za-z0-9_-]", "_", session_name)[:100]
+def _role_slug(role):
+    """Short searchable slug from a role, embedded in the peer tool name so
+    the name carries routing info even when schemas are deferred."""
+    role = (role or "").strip()
+    if not role or role.lower() == "unassigned":
+        return ""
+    words = re.sub(r"[^A-Za-z0-9 ]", " ", role).split()[:4]
+    return "_".join(w.lower() for w in words)[:24].rstrip("_")
+
+
+def _peer_tool_base(session_name):
+    return "peer_" + re.sub(r"[^A-Za-z0-9_-]", "_", session_name)[:80]
+
+
+def _peer_tool_name(rec):
+    base = _peer_tool_base(rec["session_name"])
+    slug = _role_slug(rec["role"])
+    return f"{base}__{slug}" if slug else base
 
 
 def fresh_agents(limit=None):
@@ -487,7 +536,7 @@ def dynamic_agent_tools():
         proj = f" [{rec['project']}]" if rec["project"] else ""
         ask = f" Ask when: {rec['query_me_when']}." if rec["query_me_when"] else ""
         tools.append({
-            "name": _peer_tool_name(rec["session_name"]),
+            "name": _peer_tool_name(rec),
             "description": (
                 f"Peer Claude session '{rec['session_name']}'{proj}: {desc}.{ask}"
                 f" Call for its contact card; to actually talk to it, use"
@@ -501,7 +550,9 @@ def dynamic_agent_tools():
 
 def call_peer_tool(tool_name):
     for rec in fresh_agents():
-        if _peer_tool_name(rec["session_name"]) == tool_name:
+        # accept the current name or the pre-slug legacy form, so calls from
+        # stale tool lists / transcripts still resolve after a role change
+        if tool_name in (_peer_tool_name(rec), _peer_tool_base(rec["session_name"])):
             rec["contact"] = (
                 f"Address SendMessage to '{rec['session_name']}'. The ledger is"
                 " a directory only; it does not deliver messages."
@@ -596,7 +647,8 @@ def serve():
                     "protocolVersion", "2025-06-18"
                 ),
                 "capabilities": {"tools": {"listChanged": True}},
-                "serverInfo": {"name": "ledger", "version": "1.1.0"},
+                "serverInfo": {"name": "ledger", "version": "1.5.0"},
+                "instructions": SERVER_INSTRUCTIONS,
             })
         elif method == "ping":
             rpc_response(msg_id, {})
@@ -605,6 +657,14 @@ def serve():
                       for t in TOOLS]
             dyn = dynamic_agent_tools()
             state["served"] = json.dumps(dyn, sort_keys=True)
+            # Opt-in exemption from client-side schema deferral.
+            mode = (os.environ.get("LEDGER_ALWAYS_LOAD") or "none").lower()
+            if mode in ("core", "all"):
+                for t in static:
+                    t["_meta"] = {"anthropic/alwaysLoad": True}
+            if mode == "all":
+                dyn = [dict(t, _meta={"anthropic/alwaysLoad": True})
+                       for t in dyn]
             rpc_response(msg_id, {"tools": static + dyn})
         elif method == "tools/call":
             params = msg.get("params", {})
@@ -819,6 +879,16 @@ def hook_heartbeat():
                             "session_id": hook.get("session_id") or ""})
 
 
+FORCELOAD_NOTE = (
+    "[ledger] Tool-schema deferral appears active on this machine, so ledger"
+    " tool descriptions load name-only. If a user is actively present, mention"
+    " this ONCE and ask whether to eagerly load ledger tool descriptions: set"
+    " LEDGER_ALWAYS_LOAD to 'core' (the six directory tools) or 'all' (peer"
+    " tools too) in the env block of ~/.claude/settings.json — takes effect"
+    " next session. Never re-ask; if unattended, skip this entirely."
+)
+
+
 def build_roster(exclude_session_id="", exclude_name=""):
     """Compact peer roster for context injection. Empty string if no fresh peers."""
     conn = connect()
@@ -852,6 +922,12 @@ def build_roster(exclude_session_id="", exclude_name=""):
         f"spec). Details: {TOOL_PREFIX}find_agents. The ledger is a directory, "
         "never a message channel."
     )
+    if deferral_active():
+        header += (
+            " Note: tool schemas may be deferred on this machine (ledger tools"
+            " appear name-only) — this roster is the authoritative peer list;"
+            " load ledger tools via ToolSearch by name before calling them."
+        )
     return header + "\n" + "\n".join(lines)
 
 
@@ -883,6 +959,7 @@ def hook_roster():
     os.makedirs(state_dir, exist_ok=True)
     state_path = os.path.join(state_dir, sid)
 
+    state = {"p": 0, "t": 0}
     fire = True
     if os.path.exists(state_path):
         try:
@@ -894,8 +971,11 @@ def hook_roster():
         key = "t" if is_tool else "p"
         state[key] = int(state.get(key, 0)) + 1
         fire = state[key] >= every
+    if fire:
+        state["p"] = 0
+        state["t"] = 0
     with open(state_path, "w") as f:
-        f.write(json.dumps({"p": 0, "t": 0} if fire else state))
+        f.write(json.dumps(state))
 
     # Opportunistic prune of counters from long-dead sessions.
     try:
@@ -917,6 +997,11 @@ def hook_roster():
     parts = [p for p in (roster,) if p]
     if own is None:
         parts.append(REGISTER_NUDGE)
+    if deferral_active() and not state.get("fl"):
+        parts.append(FORCELOAD_NOTE)
+        state["fl"] = True
+        with open(state_path, "w") as f:
+            f.write(json.dumps(state))
     if parts:
         print(json.dumps({
             "hookSpecificOutput": {

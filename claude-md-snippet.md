@@ -20,8 +20,10 @@ This machine runs a session directory (the `ledger` MCP server). It tells you
    meaningfully shifts; the tmux label follows `project`. Never `/rename` a
    registered session — the name is its address.
 3. **Route before messaging.** Check the injected roster, `peer_*` tools, or
-   `mcp__ledger__find_agents` before messaging a peer about a topic; address
-   `SendMessage` with the returned `session_name`. If the ledger is down or an
-   entry is stale, fall back to native `ListAgents`.
+   `find_agents` before messaging a peer about a topic; address `SendMessage`
+   with the returned `session_name`. Ledger tools may be deferred (name-only)
+   — load them via ToolSearch first; `/cars:register` is the manual fallback.
+   If the ledger is down or an entry is stale, fall back to native
+   `ListAgents`.
 4. **Directory only.** Never use the ledger to leave notes or deliver
    messages — no "note in the ledger" patterns, ever.

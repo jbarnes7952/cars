@@ -110,6 +110,33 @@ trigger condition ("message me before touching schema.sql"), not a topic.
 | `LEDGER_AGENT_TOOLS` | `1` | expose peers as tools; `0` = static six tools only |
 | `LEDGER_TOOLS_POLL` | `20` | seconds between registry polls for `list_changed`; `0` = notify only on own mutations |
 
+**Deferred tool loading (expect it).** Claude Code defers MCP tool schemas by
+default (tool-search mode): only tool *names* enter context; descriptions are
+fetched on demand via ToolSearch. CARS is designed to work under deferral:
+
+- The server sends MCP `instructions` at connect — these stay in context even
+  when every tool is deferred, and teach the vocabulary→tool-name mapping.
+- Peer tool names embed the role (`peer_<session>__<role-slug>`), so the
+  always-visible name carries routing info; legacy `peer_<session>` calls
+  still resolve after a role change.
+- The injected roster is the authoritative live peer list under deferral, and
+  says so when deferral is detected (any `ENABLE_TOOL_SEARCH` other than
+  `false`). On the first injection of a session it also asks the user once
+  whether to enable eager loading.
+
+Knobs:
+
+| var | default | meaning |
+|---|---|---|
+| `LEDGER_ALWAYS_LOAD` | `none` | `core` marks the six directory tools with `_meta: {"anthropic/alwaysLoad": true}` (exempt from deferral); `all` includes `peer_*` tools |
+| `ENABLE_TOOL_SEARCH` (client-side, not CARS) | unset = defer | `auto`/`auto:N` = defer past a context threshold; `false` = eager-load everything |
+
+Work-machine playbook (many corporate MCP servers): update Claude Code to
+≥ v2.1.214 (older builds could wipe the deferred-tool index on a failed
+`list_changed` refresh — CARS's dynamic peer tools churn that), rely on the
+roster + `find_agents`, and opt into `LEDGER_ALWAYS_LOAD=core` if the
+directory tools themselves fail to load on demand.
+
 **Automatic registration (future, currently unwired).** The SessionStart/SessionEnd hooks
 and `launch-session.sh` implement lifecycle-driven auto registration. They
 work (tested) but are deliberately not wired into settings — hooks can't see

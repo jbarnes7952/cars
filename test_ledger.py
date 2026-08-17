@@ -502,8 +502,10 @@ class LedgerTest(unittest.TestCase):
         self.assertNotIn("peer_pg-owner", first)
         self.assertIn("notifications/tools/list_changed", notifications)
         second = {t["name"]: t for t in responses[4]["result"]["tools"]}
-        self.assertIn("peer_pg-owner", second)
-        self.assertIn("before schema changes", second["peer_pg-owner"]["description"])
+        self.assertIn("peer_pg-owner__schema_owner", second)
+        self.assertIn("before schema changes",
+                      second["peer_pg-owner__schema_owner"]["description"])
+        # id5 called the legacy pre-slug name — must still resolve
         card = json.loads(responses[5]["result"]["content"][0]["text"])
         self.assertEqual(card["session_name"], "pg-owner")
         self.assertIn("SendMessage", card["contact"])
@@ -530,6 +532,57 @@ class LedgerTest(unittest.TestCase):
         responses, notifications = self._stdio(msgs)
         self.assertIn("notifications/tools/list_changed", notifications)
         self.assertTrue(responses[3]["result"]["isError"])
+
+    def test_peer_tool_role_slug_names(self):
+        self.call("register", session_name="a", role="Schema Owner, Postgres!")
+        self.call("register", session_name="b")  # role defaults to unassigned
+        names = {t["name"] for t in self.ledger.dynamic_agent_tools()}
+        self.assertIn("peer_a__schema_owner_postgres", names)
+        self.assertIn("peer_b", names)
+        # both current and legacy names resolve the call
+        self.assertEqual(
+            self.ledger.call_peer_tool("peer_a__schema_owner_postgres")
+            ["session_name"], "a")
+        self.assertEqual(
+            self.ledger.call_peer_tool("peer_a")["session_name"], "a")
+
+    def test_always_load_meta_modes(self):
+        self.call("register", session_name="pg", role="db")
+        msgs = [self.INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+        for mode, core_meta, peer_meta in (
+                ("none", False, False), ("core", True, False),
+                ("all", True, True)):
+            responses, _ = self._stdio(msgs, LEDGER_ALWAYS_LOAD=mode)
+            tools = {t["name"]: t for t in responses[2]["result"]["tools"]}
+            self.assertEqual(
+                "_meta" in tools["register"], core_meta, mode)
+            self.assertEqual(
+                "_meta" in tools["peer_pg__db"], peer_meta, mode)
+            if core_meta:
+                self.assertTrue(
+                    tools["register"]["_meta"]["anthropic/alwaysLoad"])
+
+    def test_roster_deferral_note_and_forceload_once(self):
+        self.call("register", session_name="peer-1", session_id="other")
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="1")
+        env.pop("ENABLE_TOOL_SEARCH", None)  # unset => deferral assumed
+        def run(extra=None):
+            e = dict(env, **(extra or {}))
+            proc = subprocess.run(
+                [sys.executable, SERVER, "hook-roster"],
+                input=json.dumps({"session_id": "sess-d", "cwd": "/nope"}),
+                capture_output=True, text=True, env=e)
+            return proc.stdout.strip()
+        first = json.loads(run())["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("schemas may be deferred", first)      # header note
+        self.assertIn("LEDGER_ALWAYS_LOAD", first)           # force-load ask
+        second = json.loads(run())["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("schemas may be deferred", second)     # note persists
+        self.assertNotIn("LEDGER_ALWAYS_LOAD", second)       # ask only once
+        eager = json.loads(run({"ENABLE_TOOL_SEARCH": "false",
+                                "LEDGER_ROSTER_EVERY": "1"}))[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("schemas may be deferred", eager)
 
     def test_watcher_notifies_on_external_registration(self):
         import threading

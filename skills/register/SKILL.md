@@ -29,7 +29,8 @@ Try in order:
 
 Use the `ledger` MCP server's tools (named `mcp__ledger__*` when registered
 manually, `mcp__plugin_cars_ledger__*` when installed as the cars plugin —
-use whichever form appears in your tool list).
+use whichever form appears in your tool list). If they appear name-only
+(schemas deferred), load them via ToolSearch by exact name before calling.
 
 Check `list_agents_detailed` (`include_stale: true`) for an existing row
 under that name.
