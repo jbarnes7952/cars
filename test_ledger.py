@@ -562,6 +562,20 @@ class LedgerTest(unittest.TestCase):
         self.assertLess(len(tool["description"]), 600)
         self.assertNotRegex(tool["description"], r"\w…\w")  # word-boundary cut
 
+    def test_trigger_outranks_status_in_generated_card(self):
+        # a wordy status must never evict the routing tripwire
+        self.call("register", session_name="p", role="r",
+                  status="filler status " * 40,
+                  query_me_when="critical trigger phrase here")
+        tool = [t for t in self.ledger.dynamic_agent_tools()
+                if t["name"].startswith("ask_p")][0]
+        self.assertIn("critical trigger phrase here", tool["description"])
+        self.assertIn("SendMessage (to: 'p')", tool["description"])
+        line = [l for l in self.ledger.build_roster().splitlines()
+                if l.startswith("- p")][0]
+        self.assertIn("critical trigger phrase here", line)
+        self.assertLessEqual(len(line), 210)
+
     def test_always_load_meta_modes(self):
         self.call("register", session_name="pg", role="db")
         msgs = [self.INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]

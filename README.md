@@ -109,6 +109,8 @@ trigger condition ("message me before touching schema.sql"), not a topic.
 |---|---|---|
 | `LEDGER_AGENT_TOOLS` | `1` | expose peers as tools; `0` = static six tools only |
 | `LEDGER_TOOLS_POLL` | `20` | seconds between registry polls for `list_changed`; `0` = notify only on own mutations |
+| `LEDGER_PEER_DESC_MAX` | `420` | peer tool description budget, spent priority-first: contact instruction (never cut) > `query_me_when` > role > status (dropped when tight); word-boundary trims |
+| `LEDGER_ROSTER_LINE_MAX` | `200` | roster line budget, same priority order |
 
 **Deferred tool loading (expect it).** Claude Code defers MCP tool schemas by
 default (tool-search mode): only tool *names* enter context; descriptions are

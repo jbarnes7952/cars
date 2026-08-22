@@ -26,6 +26,10 @@ Config (env, set in ~/.claude/settings.json "env" block):
     LEDGER_AGENT_TOOLS   expose each fresh agent as an MCP tool (default 1; 0=off)
     LEDGER_TOOLS_POLL    seconds between registry polls for tools/list_changed
                          notifications (default 20; 0=off)
+    LEDGER_PEER_DESC_MAX peer tool description budget in chars (default 420);
+                         spent priority-first: contact > query_me_when > role
+                         > status
+    LEDGER_ROSTER_LINE_MAX  roster line budget (default 200), same priorities
     LEDGER_ALWAYS_LOAD   exempt tools from client-side schema deferral via
                          _meta anthropic/alwaysLoad: none (default) | core
                          (the six static tools) | all (peer_* tools too)
@@ -513,6 +517,29 @@ def _trim_words(text, limit):
     return cut + "…"
 
 
+def _compose_card(rec, budget, ask_label, head, tail=""):
+    """Budget-aware card text. The budget is spent in *importance* order —
+    head/tail (identity + contact instruction) are reserved and never cut,
+    query_me_when (the routing tripwire) is funded next, then role; status
+    gets only leftover room and is dropped entirely when space is tight.
+    Fields are then assembled in natural reading order."""
+    room = budget - len(head) - len(tail)
+    qmw = (rec["query_me_when"] or "").strip()
+    role = (rec["role"] or "").strip() or "no role set"
+    status = (rec["status"] or "").strip()
+    ask = _trim_words(qmw, max(120, room - 100)) if qmw else ""
+    if ask:
+        room -= len(ask) + len(ask_label)
+    role_t = _trim_words(role, max(40, min(room - 10, 100)))
+    room -= len(role_t)
+    status_t = (_trim_words(status, room - 10)
+                if status and room - 10 >= 30 else "")
+    mid = role_t + (f" — {status_t}" if status_t else "")
+    if ask:
+        mid += f"{ask_label}{ask}"
+    return head + mid + tail
+
+
 def _role_slug(role):
     """Short searchable slug from a role, embedded in the peer tool name so
     the name carries routing info even when schemas are deferred."""
@@ -579,22 +606,18 @@ def dynamic_agent_tools():
     if _env_int("LEDGER_AGENT_TOOLS", 1) <= 0:
         return []
     tools = []
+    budget = _env_int("LEDGER_PEER_DESC_MAX", 420)
     for rec in fresh_agents(_env_int("LEDGER_ROSTER_MAX", ROSTER_MAX_DEFAULT)):
-        desc = _trim_words(
-            " — ".join(x for x in (rec["role"], rec["status"]) if x)
-            or "no role set", 140)
+        name = rec["session_name"]
         proj = f" [{rec['project']}]" if rec["project"] else ""
-        ask = (f" Ask when: {_trim_words(rec['query_me_when'], 180)}."
-               if rec["query_me_when"] else "")
-        # Trim the variable fields, never the contact instruction — the
-        # SendMessage pointer must survive whatever the card's authors wrote.
         tools.append({
             "name": _peer_tool_name(rec),
-            "description": (
-                f"Peer Claude session '{rec['session_name']}'{proj}: {desc}.{ask}"
-                f" Call for its contact card; to actually talk to it, use"
-                f" SendMessage (to: '{rec['session_name']}') — the ledger never"
-                f" delivers messages."
+            "description": _compose_card(
+                rec, budget,
+                ask_label=". Ask when: ",
+                head=f"Peer Claude session '{name}'{proj}: ",
+                tail=(f". Message it via SendMessage (to: '{name}'); calling"
+                      " this tool returns its full contact card."),
             ),
             "inputSchema": {"type": "object", "properties": {}},
         })
@@ -958,10 +981,12 @@ def build_roster(exclude_session_id="", exclude_name=""):
             continue
         if exclude_name and rec["session_name"] == exclude_name:
             continue
-        desc = " — ".join(x for x in (rec["role"], rec["status"]) if x)
         proj = f" [{rec['project']}]" if rec["project"] else ""
-        ask = f"; ask about: {rec['query_me_when']}" if rec["query_me_when"] else ""
-        lines.append(_trim_words(f"- {rec['session_name']}{proj}: {desc}{ask}", 200))
+        lines.append(_compose_card(
+            rec, _env_int("LEDGER_ROSTER_LINE_MAX", 200),
+            ask_label="; ask about: ",
+            head=f"- {rec['session_name']}{proj}: ",
+        ))
         if len(lines) >= max_agents:
             break
     if not lines:
