@@ -19,7 +19,7 @@ This machine runs a session directory (the `ledger` MCP server). It tells you
 2. **Keep it current.** Call `mcp__ledger__update_registration` when focus
    meaningfully shifts; the tmux label follows `project`. Never `/rename` a
    registered session — the name is its address.
-3. **Route before messaging.** Check the injected roster, `peer_*` tools, or
+3. **Route before messaging.** Check the injected roster, `ask_*` peer tools, or
    `find_agents` before messaging a peer about a topic; address `SendMessage`
    with the returned `session_name`. Ledger tools may be deferred (name-only)
    — load them via ToolSearch first; `/cars:register` is the manual fallback.

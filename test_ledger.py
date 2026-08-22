@@ -499,12 +499,12 @@ class LedgerTest(unittest.TestCase):
         self.assertTrue(
             responses[1]["result"]["capabilities"]["tools"]["listChanged"])
         first = {t["name"] for t in responses[2]["result"]["tools"]}
-        self.assertNotIn("peer_pg-owner", first)
+        self.assertNotIn("ask_pg-owner__schema_owner", first)
         self.assertIn("notifications/tools/list_changed", notifications)
         second = {t["name"]: t for t in responses[4]["result"]["tools"]}
-        self.assertIn("peer_pg-owner__schema_owner", second)
+        self.assertIn("ask_pg-owner__schema_owner", second)
         self.assertIn("before schema changes",
-                      second["peer_pg-owner__schema_owner"]["description"])
+                      second["ask_pg-owner__schema_owner"]["description"])
         # id5 called the legacy pre-slug name — must still resolve
         card = json.loads(responses[5]["result"]["content"][0]["text"])
         self.assertEqual(card["session_name"], "pg-owner")
@@ -536,15 +536,21 @@ class LedgerTest(unittest.TestCase):
     def test_peer_tool_role_slug_names(self):
         self.call("register", session_name="a", role="Schema Owner, Postgres!")
         self.call("register", session_name="b")  # role defaults to unassigned
+        addr, _ = self._fake_uds("named.sock")
+        self.call("register", session_name=addr, role="GRC advisor")
         names = {t["name"] for t in self.ledger.dynamic_agent_tools()}
-        self.assertIn("peer_a__schema_owner_postgres", names)
-        self.assertIn("peer_b", names)
-        # both current and legacy names resolve the call
+        self.assertIn("ask_a__schema_owner_postgres", names)
+        self.assertIn("ask_b", names)
+        h = self.ledger._addr_hash(addr)
+        self.assertIn(f"ask_grc_advisor_{h}", names)
+        # current, stale-slug, and legacy peer_* names all resolve
+        for tool in ("ask_a__schema_owner_postgres", "ask_a__old_role",
+                     "peer_a", "peer_a__former_slug"):
+            self.assertEqual(
+                self.ledger.call_peer_tool(tool)["session_name"], "a", tool)
         self.assertEqual(
-            self.ledger.call_peer_tool("peer_a__schema_owner_postgres")
-            ["session_name"], "a")
-        self.assertEqual(
-            self.ledger.call_peer_tool("peer_a")["session_name"], "a")
+            self.ledger.call_peer_tool(f"ask_stale_slug_{h}")["session_name"],
+            addr)
 
     def test_always_load_meta_modes(self):
         self.call("register", session_name="pg", role="db")
@@ -557,7 +563,7 @@ class LedgerTest(unittest.TestCase):
             self.assertEqual(
                 "_meta" in tools["register"], core_meta, mode)
             self.assertEqual(
-                "_meta" in tools["peer_pg__db"], peer_meta, mode)
+                "_meta" in tools["ask_pg__db"], peer_meta, mode)
             if core_meta:
                 self.assertTrue(
                     tools["register"]["_meta"]["anthropic/alwaysLoad"])

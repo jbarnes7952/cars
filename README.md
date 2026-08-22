@@ -92,7 +92,7 @@ with the same `session_id` are superseded (deleted with a
 derived address; `LEDGER_SOCK_DIR` overrides the socket directory (tests).
 
 **Agents as tools (wired, on by default).** The MCP server also renders each
-fresh registered agent as a tool — `peer_<name>`, description = its routing
+fresh registered agent as a tool — `ask_<agent>__<role-slug>`, description = its routing
 card (`role — status. Ask when: <query_me_when>`) — so peers appear in the
 tool list exactly like MCP capabilities. Calling a peer tool returns its
 contact card; actual messaging is always native `SendMessage`. The server
@@ -116,8 +116,8 @@ fetched on demand via ToolSearch. CARS is designed to work under deferral:
 
 - The server sends MCP `instructions` at connect — these stay in context even
   when every tool is deferred, and teach the vocabulary→tool-name mapping.
-- Peer tool names embed the role (`peer_<session>__<role-slug>`), so the
-  always-visible name carries routing info; legacy `peer_<session>` calls
+- Peer tool names embed the role (`ask_<agent>__<role-slug>`), so the
+  always-visible name carries routing info; legacy `ask_<agent>` calls
   still resolve after a role change.
 - The injected roster is the authoritative live peer list under deferral, and
   says so when deferral is detected (any `ENABLE_TOOL_SEARCH` other than
@@ -128,7 +128,7 @@ Knobs:
 
 | var | default | meaning |
 |---|---|---|
-| `LEDGER_ALWAYS_LOAD` | `none` | `core` marks the six directory tools with `_meta: {"anthropic/alwaysLoad": true}` (exempt from deferral); `all` includes `peer_*` tools |
+| `LEDGER_ALWAYS_LOAD` | `none` | `core` marks the six directory tools with `_meta: {"anthropic/alwaysLoad": true}` (exempt from deferral); `all` includes `ask_*` peer tools |
 | `ENABLE_TOOL_SEARCH` (client-side, not CARS) | unset = defer | `auto`/`auto:N` = defer past a context threshold; `false` = eager-load everything |
 
 Work-machine playbook (many corporate MCP servers): update Claude Code to

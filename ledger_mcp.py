@@ -104,14 +104,28 @@ SERVER_INSTRUCTIONS = (
     " transports messages. Tools (schemas may be deferred; load by exact name"
     " via ToolSearch): register, update_registration, find_agents,"
     " list_agents_detailed, heartbeat, deregister. Each active peer session"
-    " also appears as a tool named peer_<session>__<role-slug>; calling it"
-    " returns that peer's contact card (who they are, when to message them)."
+    " also appears as a tool named ask_<agent>__<role-slug> (e.g."
+    " ask_orion__pi_kiosk_owner); calling it returns that peer's contact card"
+    " (who they are, when to message them)."
     " Registration: once this session's purpose is clear, ask an attended"
     " user once before registering (register without asking if unattended);"
     " omit session_name to register under this session's transport address."
     " The periodically injected [ledger] roster block is the authoritative"
     " live peer list."
 )
+
+def _plugin_version():
+    """Version from the plugin manifest beside this file — single source of
+    truth, so serverInfo can't drift from releases again."""
+    try:
+        manifest = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            ".claude-plugin", "plugin.json")
+        with open(manifest) as f:
+            return json.load(f).get("version") or "unknown"
+    except (OSError, ValueError):
+        return "unknown"
+
 
 def deferral_active():
     """Tool-schema deferral is Claude Code's default; only an explicit
@@ -500,14 +514,39 @@ def _role_slug(role):
     return "_".join(w.lower() for w in words)[:24].rstrip("_")
 
 
-def _peer_tool_base(session_name):
-    return "peer_" + re.sub(r"[^A-Za-z0-9_-]", "_", session_name)[:80]
+def _addr_hash(session_name):
+    import hashlib
+    return hashlib.sha1(session_name.encode()).hexdigest()[:4]
 
 
 def _peer_tool_name(rec):
-    base = _peer_tool_base(rec["session_name"])
+    """ask_<meaning-first> — the name is the tool's only visible advertisement
+    when schemas are deferred, so meaning leads and transport addresses never
+    appear (the call returns the routable address)."""
     slug = _role_slug(rec["role"])
-    return f"{base}__{slug}" if slug else base
+    name = rec["session_name"]
+    if name.startswith("uds:"):
+        return f"ask_{slug}_{_addr_hash(name)}" if slug \
+            else f"ask_agent_{_addr_hash(name)}"
+    base = re.sub(r"[^A-Za-z0-9_-]", "_", name)[:40]
+    return f"ask_{base}__{slug}" if slug else f"ask_{base}"
+
+
+def _matches_peer(rec, tool_name):
+    """Accept the current name, stale-slug variants (role changed since the
+    caller's tool list), and pre-1.6 legacy peer_* forms."""
+    if tool_name == _peer_tool_name(rec):
+        return True
+    name = rec["session_name"]
+    if name.startswith("uds:"):
+        return (tool_name.startswith(("ask_", "peer_"))
+                and tool_name.endswith("_" + _addr_hash(name))) \
+            or tool_name.startswith(
+                "peer_" + re.sub(r"[^A-Za-z0-9_-]", "_", name)[:80])
+    base40 = re.sub(r"[^A-Za-z0-9_-]", "_", name)[:40]
+    base80 = "peer_" + re.sub(r"[^A-Za-z0-9_-]", "_", name)[:80]
+    return tool_name in (f"ask_{base40}", base80) \
+        or tool_name.startswith((f"ask_{base40}__", base80 + "__"))
 
 
 def fresh_agents(limit=None):
@@ -550,9 +589,7 @@ def dynamic_agent_tools():
 
 def call_peer_tool(tool_name):
     for rec in fresh_agents():
-        # accept the current name or the pre-slug legacy form, so calls from
-        # stale tool lists / transcripts still resolve after a role change
-        if tool_name in (_peer_tool_name(rec), _peer_tool_base(rec["session_name"])):
+        if _matches_peer(rec, tool_name):
             rec["contact"] = (
                 f"Address SendMessage to '{rec['session_name']}'. The ledger is"
                 " a directory only; it does not deliver messages."
@@ -647,7 +684,7 @@ def serve():
                     "protocolVersion", "2025-06-18"
                 ),
                 "capabilities": {"tools": {"listChanged": True}},
-                "serverInfo": {"name": "ledger", "version": "1.5.0"},
+                "serverInfo": {"name": "ledger", "version": _plugin_version()},
                 "instructions": SERVER_INSTRUCTIONS,
             })
         elif method == "ping":
