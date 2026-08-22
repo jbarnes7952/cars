@@ -8,7 +8,7 @@
     {
       "name": "cars",
       "source": "./",
-      "version": "1.6.0",
+      "version": "1.6.1",
       "description": "Peer Session Ledger: discovery directory for Claude Code sessions — register role/capabilities, find who to SendMessage. Bundles the ledger MCP server, roster/nudge + heartbeat + tmux hooks, and /cars:register + /cars:deregister skills."
     }
   ]

@@ -504,6 +504,15 @@ def _env_int(name, default):
         return default
 
 
+def _trim_words(text, limit):
+    """Cap text at a word boundary with an ellipsis, never mid-word."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(",;:- ")
+    return cut + "…"
+
+
 def _role_slug(role):
     """Short searchable slug from a role, embedded in the peer tool name so
     the name carries routing info even when schemas are deferred."""
@@ -571,9 +580,14 @@ def dynamic_agent_tools():
         return []
     tools = []
     for rec in fresh_agents(_env_int("LEDGER_ROSTER_MAX", ROSTER_MAX_DEFAULT)):
-        desc = " — ".join(x for x in (rec["role"], rec["status"]) if x) or "no role set"
+        desc = _trim_words(
+            " — ".join(x for x in (rec["role"], rec["status"]) if x)
+            or "no role set", 140)
         proj = f" [{rec['project']}]" if rec["project"] else ""
-        ask = f" Ask when: {rec['query_me_when']}." if rec["query_me_when"] else ""
+        ask = (f" Ask when: {_trim_words(rec['query_me_when'], 180)}."
+               if rec["query_me_when"] else "")
+        # Trim the variable fields, never the contact instruction — the
+        # SendMessage pointer must survive whatever the card's authors wrote.
         tools.append({
             "name": _peer_tool_name(rec),
             "description": (
@@ -581,7 +595,7 @@ def dynamic_agent_tools():
                 f" Call for its contact card; to actually talk to it, use"
                 f" SendMessage (to: '{rec['session_name']}') — the ledger never"
                 f" delivers messages."
-            )[:400],
+            ),
             "inputSchema": {"type": "object", "properties": {}},
         })
     return tools
@@ -947,7 +961,7 @@ def build_roster(exclude_session_id="", exclude_name=""):
         desc = " — ".join(x for x in (rec["role"], rec["status"]) if x)
         proj = f" [{rec['project']}]" if rec["project"] else ""
         ask = f"; ask about: {rec['query_me_when']}" if rec["query_me_when"] else ""
-        lines.append(f"- {rec['session_name']}{proj}: {desc}{ask}"[:200])
+        lines.append(_trim_words(f"- {rec['session_name']}{proj}: {desc}{ask}", 200))
         if len(lines) >= max_agents:
             break
     if not lines:

@@ -552,6 +552,16 @@ class LedgerTest(unittest.TestCase):
             self.ledger.call_peer_tool(f"ask_stale_slug_{h}")["session_name"],
             addr)
 
+    def test_peer_description_never_loses_contact_instruction(self):
+        self.call("register", session_name="wordy", role="r " * 40,
+                  status="s " * 100, query_me_when="w " * 200)
+        tool = [t for t in self.ledger.dynamic_agent_tools()
+                if "wordy" in t["name"]][0]
+        self.assertIn("SendMessage (to: 'wordy')", tool["description"])
+        self.assertIn("…", tool["description"])
+        self.assertLess(len(tool["description"]), 600)
+        self.assertNotRegex(tool["description"], r"\w…\w")  # word-boundary cut
+
     def test_always_load_meta_modes(self):
         self.call("register", session_name="pg", role="db")
         msgs = [self.INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
