@@ -128,7 +128,7 @@ Knobs:
 
 | var | default | meaning |
 |---|---|---|
-| `LEDGER_ALWAYS_LOAD` | `none` | `core` marks the six directory tools with `_meta: {"anthropic/alwaysLoad": true}` (exempt from deferral); `all` includes `ask_*` peer tools |
+| `LEDGER_ALWAYS_LOAD` | `none` | `core` marks the six directory tools with `_meta: {"anthropic/alwaysLoad": true}` (exempt from deferral); `all` includes `ask_*` peer tools. **Field-verified 2026-08-22: Claude Code honors the per-tool `_meta` flag** — with `core` set, the directory tools arrive fully loaded in fresh sessions |
 | `ENABLE_TOOL_SEARCH` (client-side, not CARS) | unset = defer | `auto`/`auto:N` = defer past a context threshold; `false` = eager-load everything |
 
 Work-machine playbook (many corporate MCP servers): update Claude Code to
