@@ -215,6 +215,33 @@ Direct `claude` launches still work: the SessionStart hook registers a
 the real messaging name, so the CLAUDE.md snippet instructs Claude to correct
 its registration on the first turn.
 
+### Registering on behalf of a spawned session
+
+A session cannot see its own display name, which is why automatic
+registration from hooks stays unwired. A **spawner** can: it chose the name,
+it has the child's pid and cwd, and once the child has written
+`<CLAUDE_CONFIG_DIR>/sessions/<pid>.json` it can read the child's
+`sessionId` and `messagingSocketPath` too. So the spawner registers the child
+with the `register` CLI verb (see [CLI](#cli)), passing `session_name`
+explicitly:
+
+- Use the child's transport address, `uds:<messagingSocketPath>`, as
+  `session_name`. It is routable by `SendMessage` from any profile, and it is
+  the same key the child would derive if it later self-registers without a
+  name, so the two upserts land on one row instead of colliding.
+- Pass the human label through `claude -n <label>` and `CLAUDE_LEDGER_NAME`
+  in the child's environment, so `ListAgents`, the tmux window, and the
+  hook-side name fallback all agree. It is a label, not the ledger key.
+- Pass `session_id` when known. Heartbeats and the SessionEnd deregister
+  match on it first, and a later registration under a different name with
+  the same `session_id` supersedes the spawner's row cleanly.
+- Set `name_source` (for example `seat`) so the register event records who
+  chose the name.
+
+Omitting `session_name` from the CLI verb derives the address of the
+process running it, which for a spawner is its own parent session, never the
+child.
+
 ### Session name resolution (hooks)
 
 Priority order:
@@ -277,7 +304,22 @@ events are sampled to at most one per session per 5 minutes.
 ```bash
 python3 ledger_mcp.py list           # pretty-print live agents
 python3 ledger_mcp.py list --stale   # include stale entries
+python3 ledger_mcp.py list --json    # the list_agents_detailed record as JSON
 sqlite3 ~/.claude-ledger/ledger.db 'SELECT * FROM events ORDER BY id'  # full history
+```
+
+The four mutating tools are also CLI verbs, for spawners and scripts that
+are not themselves MCP clients. The tool arguments are one JSON object, read
+from stdin or given as `--json '{...}'`; the resulting record is printed as
+JSON; the ledger's rejection reason goes to stderr with exit 1:
+
+```bash
+echo '{"session_name": "uds:/run/user/1000/cc-socks/4242.sock", "session_id": "…",
+       "pid": 4242, "cwd": "/repo", "project": "repo", "role": "worker",
+       "name_source": "seat"}' | python3 ledger_mcp.py register
+python3 ledger_mcp.py update --json '{"session_name": "…", "status": "busy"}'
+python3 ledger_mcp.py heartbeat --json '{"session_name": "…"}'
+python3 ledger_mcp.py deregister --json '{"session_name": "…"}'
 ```
 
 ## tmux relabeling
@@ -317,4 +359,6 @@ python3 test_ledger.py
 
 Covers: schema idempotency, register/upsert, partial update, heartbeat
 sampling, find/list with staleness flags, lazy eviction, idempotent
-deregister, hook name resolution, and the MCP stdio handshake end-to-end.
+deregister, hook name resolution, the CLI verbs (`register`/`update`/
+`heartbeat`/`deregister`/`list --json`), and the MCP stdio handshake
+end-to-end.

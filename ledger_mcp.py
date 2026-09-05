@@ -16,7 +16,15 @@ Usage:
                                    last_seen (hook JSON on stdin)
     ledger_mcp.py roster           print the roster text (debug/preview)
     ledger_mcp.py self-address     print this session's uds: transport address
-    ledger_mcp.py list [--stale]   pretty-print registered agents
+    ledger_mcp.py list [--stale] [--json]
+                                   pretty-print (or dump) registered agents
+    ledger_mcp.py register         directory ops from the command line: the
+    ledger_mcp.py update           tool arguments are one JSON object, read
+    ledger_mcp.py deregister       from stdin or given as --json '{...}';
+    ledger_mcp.py heartbeat        the record is printed as JSON. This is how
+                                   a spawner registers a child it launched
+                                   (pass session_name explicitly; the
+                                   child's own hooks cannot see its name).
 
 Config (env, set in ~/.claude/settings.json "env" block):
     LEDGER_ROSTER_EVERY  roster push every N prompts (default 5; 1=every, 0=off)
@@ -1087,8 +1095,11 @@ def hook_roster():
         }))
 
 
-def cli_list(include_stale):
+def cli_list(include_stale, as_json=False):
     result = call_tool("list_agents_detailed", {"include_stale": include_stale})
+    if as_json:
+        print(json.dumps(result))
+        return
     agents = result["agents"]
     if not agents:
         print("no registered agents")
@@ -1100,6 +1111,52 @@ def cli_list(include_stale):
     print("  ".join(c.ljust(widths[c]) for c in cols))
     for a in agents:
         print("  ".join(str(a[c]).ljust(widths[c]) for c in cols))
+
+
+CLI_TOOLS = {
+    "register": "register",
+    "update": "update_registration",
+    "deregister": "deregister",
+    "heartbeat": "heartbeat",
+}
+
+
+def _cli_json_args(argv):
+    """Tool arguments for a CLI verb: the object after --json, else stdin."""
+    if "--json" in argv:
+        i = argv.index("--json")
+        if i + 1 >= len(argv):
+            raise ToolError("--json needs a JSON object argument")
+        raw = argv[i + 1]
+    else:
+        raw = sys.stdin.read()
+    raw = raw.strip()
+    if not raw:
+        return {}
+    try:
+        obj = json.loads(raw)
+    except ValueError as exc:
+        raise ToolError(f"invalid JSON: {exc}")
+    if not isinstance(obj, dict):
+        raise ToolError("expected a JSON object")
+    return obj
+
+
+def cli_call(verb, argv):
+    """Run one directory op from the command line and print the record as
+    JSON; exit 1 with the reason on stderr when the ledger rejects it.
+
+    This is the seam a spawner uses to register a child it launched: it knows
+    the child's name, pid, cwd, and session_id, which the child's own hooks
+    cannot see. Without session_name, register derives THIS process's
+    transport address (the spawner's, not the child's), so a spawner must
+    always pass one."""
+    try:
+        result = call_tool(CLI_TOOLS[verb], _cli_json_args(argv))
+    except ToolError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        sys.exit(1)
+    print(json.dumps(result))
 
 
 def main():
@@ -1131,7 +1188,9 @@ def main():
     elif cmd == "self-address":
         print(self_address() or "")
     elif cmd == "list":
-        cli_list("--stale" in sys.argv[2:])
+        cli_list("--stale" in sys.argv[2:], "--json" in sys.argv[2:])
+    elif cmd in CLI_TOOLS:
+        cli_call(cmd, sys.argv[2:])
     else:
         sys.stderr.write(__doc__)
         sys.exit(2)

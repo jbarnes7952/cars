@@ -146,6 +146,80 @@ class LedgerTest(unittest.TestCase):
         unknown = self.call("heartbeat", session_name="ghost")
         self.assertFalse(unknown["registered"])
 
+    # -------------------------------------------------------------- cli verbs
+
+    def _cli(self, *argv, stdin=""):
+        return subprocess.run(
+            [sys.executable, SERVER, *argv], input=stdin,
+            capture_output=True, text=True, env=os.environ.copy(),
+        )
+
+    def _bind_socket(self, name):
+        """A real socket file, so a uds: row survives dead-transport eviction."""
+        import socket as socketlib
+        path = os.path.join(self.tmp.name, name)
+        sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+        sock.bind(path)
+        self.addCleanup(sock.close)
+        return path
+
+    def test_cli_register_on_behalf_of_a_child(self):
+        sock = self._bind_socket("child.sock")
+        proc = self._cli("register", stdin=json.dumps({
+            "session_name": "uds:" + sock, "session_id": "child-1",
+            "pid": 4242, "cwd": "/tmp/repo", "project": "repo",
+            "role": "worker", "name_source": "seat",
+        }))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = json.loads(proc.stdout)
+        self.assertEqual(rec["session_name"], "uds:" + sock)
+        self.assertEqual(rec["pid"], 4242)
+        self.assertEqual(rec["role"], "worker")
+        self.assertEqual(rec["name_source"], "seat")
+        payload = json.loads(self.events(event="register")[0]["payload"])
+        self.assertEqual(payload["name_source"], "seat")
+        listed = self.call("list_agents_detailed")["agents"]
+        self.assertEqual([a["session_id"] for a in listed], ["child-1"])
+
+    def test_cli_update_heartbeat_deregister_roundtrip(self):
+        self.call("register", session_name="child", session_id="c-2")
+        proc = self._cli("update", "--json",
+                         json.dumps({"session_name": "child", "status": "busy"}))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["status"], "busy")
+        proc = self._cli("heartbeat", stdin='{"session_name": "child"}')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(json.loads(proc.stdout)["registered"])
+        proc = self._cli("deregister", stdin='{"session_name": "child"}')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(json.loads(proc.stdout)["deregistered"])
+        self.assertEqual(self.call("list_agents_detailed")["count"], 0)
+        # idempotent, like the tool
+        proc = self._cli("deregister", stdin='{"session_name": "child"}')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_cli_rejects_bad_input_with_exit_1(self):
+        proc = self._cli("register", stdin="not json")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("error: invalid JSON", proc.stderr)
+        proc = self._cli("update", stdin="{}")   # session_name required
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("session_name", proc.stderr)
+        proc = self._cli("register", "--json", "[1, 2]")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("expected a JSON object", proc.stderr)
+        proc = self._cli("register", "--json")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(self.call("list_agents_detailed")["count"], 0)
+
+    def test_cli_list_json(self):
+        self.call("register", session_name="lj", session_id="lj-1", role="r")
+        proc = self._cli("list", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        out = json.loads(proc.stdout)
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["agents"][0]["session_name"], "lj")
+
     # -------------------------------------------------------------- hooks
 
     def test_hook_register_env_name_priority(self):
