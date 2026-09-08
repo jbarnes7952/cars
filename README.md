@@ -290,14 +290,26 @@ is informational, not fatal.
 |---|---|
 | `register` | upsert full record (re-registering a name replaces the row) |
 | `update_registration` | partial update of `role`/`capabilities`/`query_me_when`/`status`/`project` |
-| `heartbeat` | bump `last_seen` only |
+| `heartbeat` | bump `last_seen` only; optional `via` marks a supervisor heartbeating for a child |
 | `find_agents` | free-text match across descriptive fields → returns `session_name` addresses |
 | `list_agents_detailed` | all records |
 | `deregister` | delete row (idempotent) |
 
 All return JSON. Every mutation writes an append-only `events` row in the same
 transaction (`register`/`update`/`heartbeat`/`deregister`/`evicted`); heartbeat
-events are sampled to at most one per session per 5 minutes.
+events are sampled to at most one per 5 minutes per (session, `via`) pair, so a
+supervisor's proxied heartbeats and the session's own stay separately visible.
+
+A supervisor that heartbeats for a child which cannot run hooks itself (a
+non-Claude process, say) should pass `via` naming itself:
+
+```bash
+python3 ledger_mcp.py heartbeat --json '{"session_name": "…", "via": "seat"}'
+```
+
+`via` lands in the event payload only — there is no `agents` column for it, and
+freshness is unaffected: `last_seen` is bumped on every heartbeat, sampled or
+not. Sampling thins the audit log, never the liveness signal.
 
 ## CLI
 

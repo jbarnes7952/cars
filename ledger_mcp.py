@@ -360,6 +360,7 @@ def op_update_registration(conn, args):
 def op_heartbeat(conn, args):
     name = args["session_name"]
     sid = args.get("session_id") or ""
+    via = (args.get("via") or "").strip()
     now = now_iso()
     cur = conn.execute(
         "UPDATE agents SET last_seen = ? WHERE session_name = ?", (now, name)
@@ -378,15 +379,27 @@ def op_heartbeat(conn, args):
             )
         # Sample heartbeat events: at most one per session per 5 minutes
         # (a backfill always writes one, so the audit log records it).
+        #
+        # The sample bucket is (session_name, via), not session_name alone.
+        # A row can be heartbeat from two channels at once: the session's own
+        # hooks (no `via`) and a supervisor vouching for it (`via` set).
+        # Bucketing per session alone would let whichever arrived first in a
+        # window suppress the other, so the log could not say whether the
+        # supervisor was vouching during a window the session also
+        # self-reported -- the one thing `via` exists to record. Separate
+        # buckets keep both channels visible, each still sampled at 5 minutes.
         last = conn.execute(
             "SELECT MAX(ts) AS ts FROM events"
-            " WHERE session_name = ? AND event = 'heartbeat'",
-            (name,),
+            " WHERE session_name = ? AND event = 'heartbeat'"
+            " AND IFNULL(json_extract(payload, '$.via'), '') = ?",
+            (name, via),
         ).fetchone()["ts"]
         if backfilled or last is None or age_seconds(last) > HEARTBEAT_SAMPLE_SECONDS:
             payload = {"last_seen": now}
             if backfilled:
                 payload["session_id_backfilled"] = sid
+            if via:
+                payload["via"] = via
             write_event(conn, name, sid or row["session_id"], "heartbeat", payload)
     conn.commit()
     return {"session_name": name, "registered": bool(cur.rowcount), "last_seen": now}
@@ -466,10 +479,10 @@ TOOLS = [
     },
     {
         "name": "heartbeat",
-        "description": "Mark this session as still alive (bumps last_seen).",
+        "description": "Mark this session as still alive (bumps last_seen). Pass via=<your name> when heartbeating for another session.",
         "inputSchema": {
             "type": "object",
-            "properties": {"session_name": STR, "session_id": STR},
+            "properties": {"session_name": STR, "session_id": STR, "via": STR},
             "required": ["session_name"],
         },
         "handler": op_heartbeat,

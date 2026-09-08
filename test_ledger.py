@@ -146,6 +146,48 @@ class LedgerTest(unittest.TestCase):
         unknown = self.call("heartbeat", session_name="ghost")
         self.assertFalse(unknown["registered"])
 
+    def test_heartbeat_via_recorded_and_bucketed_separately(self):
+        """A proxied heartbeat is attributable, and does not suppress the
+        session's own — the two channels sample independently."""
+        self.call("register", session_name="hbv")
+        self.call("heartbeat", session_name="hbv")                 # self
+        self.call("heartbeat", session_name="hbv", via="seat")     # proxied
+        events = self.events(event="heartbeat", session_name="hbv")
+        self.assertEqual(len(events), 2)
+        vias = sorted(json.loads(e["payload"]).get("via", "") for e in events)
+        self.assertEqual(vias, ["", "seat"])
+
+        # Within a bucket the 5-minute sampler still applies.
+        self.call("heartbeat", session_name="hbv", via="seat")
+        self.call("heartbeat", session_name="hbv")
+        self.assertEqual(len(self.events(event="heartbeat", session_name="hbv")), 2)
+
+        # Distinct supervisors are distinct buckets.
+        self.call("heartbeat", session_name="hbv", via="other")
+        self.assertEqual(len(self.events(event="heartbeat", session_name="hbv")), 3)
+
+    def test_heartbeat_via_absent_writes_no_via_key(self):
+        """Self-reported heartbeats stay exactly as they were: no via key."""
+        self.call("register", session_name="hbv2")
+        self.call("heartbeat", session_name="hbv2")
+        payload = json.loads(
+            self.events(event="heartbeat", session_name="hbv2")[0]["payload"])
+        self.assertNotIn("via", payload)
+        # Blank/whitespace via is treated as absent, not as its own bucket.
+        self.call("heartbeat", session_name="hbv2", via="   ")
+        self.assertEqual(len(self.events(event="heartbeat", session_name="hbv2")), 1)
+
+    def test_heartbeat_via_bumps_last_seen_like_any_other(self):
+        """Sampling only thins the log; freshness is never affected."""
+        self.call("register", session_name="hbv3")
+        before = self.call("list_agents_detailed")["agents"]
+        self.assertTrue(before)
+        r = self.call("heartbeat", session_name="hbv3", via="seat")
+        self.assertTrue(r["registered"])
+        row = [a for a in self.call("list_agents_detailed")["agents"]
+               if a["session_name"] == "hbv3"][0]
+        self.assertEqual(row["last_seen"], r["last_seen"])
+
     # -------------------------------------------------------------- cli verbs
 
     def _cli(self, *argv, stdin=""):
