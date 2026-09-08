@@ -483,6 +483,56 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(self._roster_hook(), "")   # prompt 3: quiet
         self.assertNotEqual(self._roster_hook(), "")  # prompt 4: fires again
 
+    def _shell_roster(self, channel, session_id="shell-sid"):
+        """Invoke hooks/roster-inject.sh the way the wired hook does."""
+        ev = "PostToolUse" if channel == "tool" else "UserPromptSubmit"
+        payload = json.dumps({"session_id": session_id, "hook_event_name": ev,
+                              "cwd": "/tmp"})
+        script = os.path.join(os.path.dirname(SERVER), "hooks", "roster-inject.sh")
+        return subprocess.run(
+            [script, channel], input=payload, capture_output=True, text=True,
+            env=os.environ.copy(),
+        ).stdout.strip()
+
+    def test_shell_gate_matches_python_cadence(self):
+        """The shell gate must fire on exactly the ticks python used to."""
+        self.call("register", session_name="peer-g", session_id="other",
+                  role="gate peer", query_me_when="gate questions")
+        os.environ["LEDGER_ROSTER_TOOLS_EVERY"] = "3"
+        self.addCleanup(os.environ.pop, "LEDGER_ROSTER_TOOLS_EVERY", None)
+        fired = [bool(self._shell_roster("tool")) for _ in range(7)]
+        # first event fires, then every 3rd
+        self.assertEqual(fired, [True, False, False, True, False, False, True])
+
+    def test_shell_gate_writes_counters_and_no_stray_keys(self):
+        """Counters live beside python's state, keyed by the same session_id,
+        so the existing 7-day prune covers them and nothing leaks."""
+        self.call("register", session_name="peer-h", session_id="other")
+        os.environ["LEDGER_ROSTER_TOOLS_EVERY"] = "3"
+        self.addCleanup(os.environ.pop, "LEDGER_ROSTER_TOOLS_EVERY", None)
+        self._shell_roster("tool", session_id="sid-x")
+        self._shell_roster("tool", session_id="sid-x")
+        state_dir = os.path.join(os.path.dirname(self.db), "roster-state")
+        names = sorted(os.listdir(state_dir))
+        self.assertIn("sid-x.tool", names)
+        # firing primes the other channel rather than removing it
+        self.assertIn("sid-x.prompt", names)
+        for n in names:
+            self.assertTrue(n.startswith("sid-x"), f"stray state file: {n}")
+
+    def test_shell_gate_falls_back_when_session_id_missing(self):
+        """No stable key means no gate: it must still inject, not go silent."""
+        self.call("register", session_name="peer-i", session_id="other",
+                  role="fallback peer")
+        script = os.path.join(os.path.dirname(SERVER), "hooks", "roster-inject.sh")
+        env = os.environ.copy()
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        out = subprocess.run(
+            [script, "tool"], input=json.dumps({"hook_event_name": "PostToolUse"}),
+            capture_output=True, text=True, env=env,
+        ).stdout.strip()
+        self.assertTrue(out, "must fall back to injecting when it cannot gate")
+
     def test_roster_excludes_self_and_stale(self):
         self.call("register", session_name="me", session_id="sess-a")
         self.call("register", session_name="old-peer", session_id="other-1")

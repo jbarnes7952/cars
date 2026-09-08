@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "LEDGER_TOOL_PREFIX=mcp__plugin_cars_ledger__ \"${CLAUDE_PLUGIN_ROOT}/hooks/roster-inject.sh\"",
+            "command": "LEDGER_TOOL_PREFIX=mcp__plugin_cars_ledger__ \"${CLAUDE_PLUGIN_ROOT}/hooks/roster-inject.sh\" prompt",
             "timeout": 10
           },
           {
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "LEDGER_TOOL_PREFIX=mcp__plugin_cars_ledger__ \"${CLAUDE_PLUGIN_ROOT}/hooks/roster-inject.sh\"",
+            "command": "LEDGER_TOOL_PREFIX=mcp__plugin_cars_ledger__ \"${CLAUDE_PLUGIN_ROOT}/hooks/roster-inject.sh\" tool",
             "timeout": 10
           },
           {
