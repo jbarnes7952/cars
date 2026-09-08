@@ -24,7 +24,9 @@ skills/
   register/SKILL.md            /register — in-session manual upsert (current mode)
   deregister/SKILL.md          /deregister — in-session manual removal
 hooks/
-  roster-inject.sh             UserPromptSubmit → periodic peer-roster context push (wired)
+  roster-inject.sh <channel>   UserPromptSubmit/PostToolUse → periodic peer-roster context push (wired)
+                               <channel> is `prompt` or `tool`; the cadence is gated in shell
+                               so python3 only starts on a firing tick
   tmux-relabel.sh              PostToolUse → tmux window/pane label (wired)
   heartbeat.sh                 UserPromptSubmit/PostToolUse/Stop → bump last_seen (wired)
   session-end-deregister.sh    SessionEnd → deregister own row (wired)
@@ -48,7 +50,8 @@ in-session ledger tool calls.
 
 **Roster push (wired).** So sessions *know about* their peers without having
 to think to call `find_agents`, a `UserPromptSubmit` hook
-(`hooks/roster-inject.sh`) periodically injects a compact live roster into
+(`hooks/roster-inject.sh`, invoked with `prompt` or `tool` to select the
+cadence channel) periodically injects a compact live roster into
 context — one line per fresh agent (`name [project]: role — status; ask
 about: ...`) plus guidance to coordinate via `SendMessage` before touching a
 peer's project. Cadence and size are configured via env vars in the `env`

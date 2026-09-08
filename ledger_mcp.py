@@ -31,6 +31,10 @@ Config (env, set in ~/.claude/settings.json "env" block):
     LEDGER_ROSTER_TOOLS_EVERY  roster push every N tool calls, for autonomous
                          sessions that rarely see user prompts (default 25; 0=off)
     LEDGER_ROSTER_MAX    max agents per roster push / per tool list (default 15)
+    LEDGER_ROSTER_GATED  set by hooks/roster-inject.sh, which gates the roster
+                         cadence in shell so python only starts on a firing
+                         tick; tells hook-roster the counting is already done.
+                         Not for users to set.
     LEDGER_AGENT_TOOLS   expose each fresh agent as an MCP tool (default 1; 0=off)
     LEDGER_TOOLS_POLL    seconds between registry polls for tools/list_changed
                          notifications (default 20; 0=off)
@@ -1056,6 +1060,12 @@ def hook_roster():
     os.makedirs(state_dir, exist_ok=True)
     state_path = os.path.join(state_dir, sid)
 
+    # hooks/roster-inject.sh gates the cadence in shell so python only starts
+    # on a firing tick; when it does, it has already counted and reset. Trust
+    # it rather than counting again, but still keep the per-session state file
+    # for flags (`fl`) that outlive a single firing.
+    gated = _env_int("LEDGER_ROSTER_GATED", 0) > 0
+
     state = {"p": 0, "t": 0}
     fire = True
     if os.path.exists(state_path):
@@ -1065,14 +1075,16 @@ def hook_roster():
             state = raw if isinstance(raw, dict) else {"p": int(raw), "t": 0}
         except (ValueError, OSError):
             state = {"p": 0, "t": 0}
-        key = "t" if is_tool else "p"
-        state[key] = int(state.get(key, 0)) + 1
-        fire = state[key] >= every
-    if fire:
+        if not gated:
+            key = "t" if is_tool else "p"
+            state[key] = int(state.get(key, 0)) + 1
+            fire = state[key] >= every
+    if fire and not gated:
         state["p"] = 0
         state["t"] = 0
-    with open(state_path, "w") as f:
-        f.write(json.dumps(state))
+    if not gated:
+        with open(state_path, "w") as f:
+            f.write(json.dumps(state))
 
     # Opportunistic prune of counters from long-dead sessions.
     try:

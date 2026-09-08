@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/cars/hooks/roster-inject.sh",
+            "command": "/path/to/cars/hooks/roster-inject.sh prompt",
             "timeout": 10
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/cars/hooks/roster-inject.sh",
+            "command": "/path/to/cars/hooks/roster-inject.sh tool",
             "timeout": 10
           }
         ]
