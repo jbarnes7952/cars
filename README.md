@@ -283,9 +283,16 @@ UserPromptSubmit, PostToolUse, and Stop events (async, timeout 10). It calls
 `ledger_mcp.py hook-heartbeat`, which matches this session's row by
 `session_id`, then unique `cwd`, then the resolved name — so manually
 `/register`-ed sessions with custom names are covered too. Throttled to one
-DB write per `LEDGER_HEARTBEAT_EVERY` seconds (default 60) per CLI process.
+DB write per `LEDGER_HEARTBEAT_EVERY` seconds (default 60) per session, keyed
+on the `session_id` in the hook payload and held in `roster-state/<id>.hb`
+alongside the roster counters, so the same 7-day prune reaps it.
 A session idle longer than the stale threshold still goes stale — staleness
 is informational, not fatal.
+
+The key must not be `$PPID`: hooks are spawned under a fresh parent on every
+invocation, so a PPID key is unique per call and the throttle never engages.
+Before this was fixed the hook heartbeat on *every* prompt, tool call and
+stop, and left a state file behind each time.
 
 ## MCP tools
 
