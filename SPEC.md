@@ -56,7 +56,7 @@ SQLite database at `~/.claude-ledger/ledger.db`. WAL mode. Two tables:
 | event | TEXT — `register` \| `update` \| `heartbeat` \| `deregister` \| `evicted` |
 | payload | TEXT — JSON snapshot of the fields written |
 
-Every mutation of `agents` writes a corresponding `events` row in the same transaction. Heartbeat events may be sampled (write at most one heartbeat event per session per 5 minutes) to keep the table small; all other event types are always written.
+Every mutation of `agents` writes a corresponding `events` row in the same transaction. Heartbeat events may be sampled (write at most one heartbeat event per session per 5 minutes) to keep the table small; all other event types are always written. The sample bucket is (`session_name`, `via`), so a session heartbeat by both its own hooks and a supervisor keeps one event per channel per window rather than letting the first arrival suppress the other.
 
 ## Staleness
 
@@ -77,7 +77,9 @@ Args: `session_name` (required), plus any subset of `role`, `capabilities`, `que
 Partial update; untouched fields keep their values. Bumps `last_seen`. Write `update` event. Returns the updated record. Error if `session_name` is not registered (tell the caller to `register` first).
 
 ### `heartbeat`
-Args: `session_name`. Bumps `last_seen` only. (Optional to wire; exists so a Stop hook can keep long-idle sessions fresh.)
+Args: `session_name`, optional `via`. Bumps `last_seen` only. (Optional to wire; exists so a Stop hook can keep long-idle sessions fresh.)
+
+`via` names the supervisor heartbeating on another session's behalf (e.g. `via: "seat"` for a spawner vouching for a child that cannot run hooks of its own). It is recorded in the sampled `heartbeat` event payload and is not stored on `agents` — the directory records who asserted liveness, without growing a column nothing renders. Omit it for a session's own heartbeat.
 
 ### `find_agents`
 Args: `query` (free text, required), `include_stale` (bool, default false).
