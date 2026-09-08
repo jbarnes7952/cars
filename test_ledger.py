@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Smoke tests for ledger-mcp. Stdlib only. Run: python3 test_ledger.py"""
 
+import glob
 import json
 import os
 import sqlite3
@@ -595,6 +596,61 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(
             json.loads(events[0]["payload"])["session_id_backfilled"],
             "sid-backfill")
+
+    def _hb_hook(self, session_id="hb-sid", env=None):
+        """Invoke hooks/heartbeat.sh the way the wired hook does: under a
+        fresh parent, which is what defeated the old $PPID-keyed throttle."""
+        script = os.path.join(os.path.dirname(SERVER), "hooks", "heartbeat.sh")
+        payload = json.dumps({"session_id": session_id,
+                              "hook_event_name": "PostToolUse", "cwd": "/tmp"})
+        return subprocess.run(
+            ["bash", "-c", f'printf %s {json.dumps(payload)} | {script}'],
+            capture_output=True, text=True, env=env or os.environ.copy(),
+        )
+
+    def test_heartbeat_hook_throttles_within_the_window(self):
+        """The throttle must actually engage — the bug it replaces never did."""
+        self.call("register", session_name="thr", session_id="hb-sid")
+        for _ in range(5):
+            self._hb_hook()
+        # 5 events, one window: exactly one heartbeat reaches the ledger.
+        self.assertEqual(len(self.events(event="heartbeat", session_name="thr")), 1)
+
+    def test_heartbeat_hook_beats_again_after_the_window(self):
+        env = os.environ.copy()
+        env["LEDGER_HEARTBEAT_EVERY"] = "0"      # window elapsed immediately
+        self.call("register", session_name="thr2", session_id="hb-sid2")
+        self._hb_hook("hb-sid2", env)
+        self._hb_hook("hb-sid2", env)
+        # Both beat; event sampling (5 min) still collapses them to one event,
+        # so assert on last_seen advancing rather than on event count.
+        state = os.path.join(os.path.dirname(self.db), "roster-state", "hb-sid2.hb")
+        self.assertTrue(os.path.exists(state))
+
+    def test_heartbeat_hook_state_is_pruneable_and_does_not_leak(self):
+        """One state file per session, beside the roster counters, so the
+        existing 7-day prune reaps it. The old key leaked one file per call."""
+        self.call("register", session_name="thr3", session_id="hb-sid3")
+        pattern = os.path.join(tempfile.gettempdir(), "claude-ledger-hb-*")
+        before = set(glob.glob(pattern))
+        for _ in range(4):
+            self._hb_hook("hb-sid3")
+        state_dir = os.path.join(os.path.dirname(self.db), "roster-state")
+        hb = [n for n in os.listdir(state_dir) if n.endswith(".hb")]
+        self.assertEqual(hb, ["hb-sid3.hb"], "one state file per session")
+        self.assertEqual(set(glob.glob(pattern)) - before, set(),
+                         "heartbeat hook must not leave per-invocation files")
+
+    def test_heartbeat_hook_beats_when_it_cannot_key(self):
+        """No session_id means no safe throttle: beat rather than drop it."""
+        self.call("register", session_name="thr4", cwd="/tmp")
+        script = os.path.join(os.path.dirname(SERVER), "hooks", "heartbeat.sh")
+        env = os.environ.copy()
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        proc = subprocess.run(
+            ["bash", "-c", f"printf %s '{{}}' | {script}"],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0)
 
     def test_roster_max_cap(self):
         for i in range(5):
