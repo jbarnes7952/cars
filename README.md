@@ -309,6 +309,9 @@ All return JSON. Every mutation writes an append-only `events` row in the same
 transaction (`register`/`update`/`heartbeat`/`deregister`/`evicted`); heartbeat
 events are sampled to at most one per 5 minutes per (session, `via`) pair, so a
 supervisor's proxied heartbeats and the session's own stay separately visible.
+Unmarked `heartbeat` events predating `via` mean *self-reported or proxied,
+unknown*: the marker starts the record rather than repairing it, and nothing
+recovers the distinction for rows written before it.
 
 A supervisor that heartbeats for a child which cannot run hooks itself (a
 non-Claude process, say) should pass `via` naming itself:

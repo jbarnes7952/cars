@@ -81,6 +81,8 @@ Args: `session_name`, optional `via`. Bumps `last_seen` only. (Optional to wire;
 
 `via` names the supervisor heartbeating on another session's behalf (e.g. `via: "seat"` for a spawner vouching for a child that cannot run hooks of its own). It is recorded in the sampled `heartbeat` event payload and is not stored on `agents` — the directory records who asserted liveness, without growing a column nothing renders. Omit it for a session's own heartbeat.
 
+The marker starts the record; it does not repair it. A `heartbeat` event written before `via` existed carries no marker whether it was self-reported or proxied, and nothing recovers the distinction afterwards. Read unmarked events from before that point as *self-reported or proxied, unknown* — not as self-reported.
+
 ### `find_agents`
 Args: `query` (free text, required), `include_stale` (bool, default false).
 Match against `role`, `capabilities`, `query_me_when`, `status`, `project` — case-insensitive substring/LIKE matching across those fields is sufficient; do **not** add embeddings or FTS in v1. Returns matching records ordered by freshness, each including `session_name` (the address to pass to `SendMessage`), `stale` flag, and all descriptive fields.
