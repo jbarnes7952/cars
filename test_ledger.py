@@ -652,6 +652,76 @@ class LedgerTest(unittest.TestCase):
             capture_output=True, text=True, env=env)
         self.assertEqual(proc.returncode, 0)
 
+    # ---------------------------------------------------------- peer_message
+
+    def _peer_msg(self, prompt, session_id="me-sid", cwd="/tmp"):
+        """Drive the hook exactly as UserPromptSubmit would."""
+        return subprocess.run(
+            [sys.executable, SERVER, "hook-peer-message"],
+            input=json.dumps({"session_id": session_id, "cwd": cwd,
+                              "hook_event_name": "UserPromptSubmit",
+                              "prompt": prompt}),
+            capture_output=True, text=True, env=os.environ.copy())
+
+    def _wrap(self, sender, body="hello"):
+        return f'<cross-session-message from="{sender}" from-name="x">{body}</cross-session-message>'
+
+    def _setup_pair(self):
+        self.call("register", session_name="sender-1", session_id="other-sid")
+        self.call("register", session_name="me", session_id="me-sid", cwd="/tmp")
+
+    def test_peer_message_records_endpoints_only(self):
+        self._setup_pair()
+        self._peer_msg(self._wrap("sender-1", "some secret body text"))
+        evs = self.events(event="peer_message")
+        self.assertEqual(len(evs), 1)
+        payload = json.loads(evs[0]["payload"])
+        self.assertEqual(payload, {"from": "sender-1", "to": "me"})
+        # the body must not appear anywhere in the row
+        self.assertNotIn("secret", evs[0]["payload"])
+
+    def test_peer_message_ignores_quoted_wrapper_in_body(self):
+        """The spoof: a sender forging an edge by quoting a wrapper."""
+        self._setup_pair()
+        self.call("register", session_name="victim", session_id="v-sid")
+        forged = self._wrap("sender-1", 'look: ' + self._wrap("victim"))
+        self._peer_msg(forged)
+        evs = self.events(event="peer_message")
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(json.loads(evs[0]["payload"])["from"], "sender-1",
+                         "must take the anchored wrapper, never a quoted one")
+
+    def test_peer_message_ignores_wrapper_not_at_offset_zero(self):
+        """A pasted transcript must not invent an edge."""
+        self._setup_pair()
+        self._peer_msg("here is a log I pasted:\n" + self._wrap("sender-1"))
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_peer_message_drops_unregistered_sender(self):
+        """Junk never enters the table rather than being filtered at read."""
+        self.call("register", session_name="me", session_id="me-sid", cwd="/tmp")
+        self._peer_msg(self._wrap("uds:/run/user/1000/cc-socks/ghost.sock"))
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_peer_message_ignores_ordinary_prompts(self):
+        self._setup_pair()
+        self._peer_msg("just a normal question about cross-session-message stuff")
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_peer_message_unsampled(self):
+        """Bursts are the interesting case, so nothing thins them."""
+        self._setup_pair()
+        for _ in range(4):
+            self._peer_msg(self._wrap("sender-1"))
+        self.assertEqual(len(self.events(event="peer_message")), 4)
+
+    def test_peer_message_needs_a_receiver_row(self):
+        """An unregistered receiver cannot claim anything."""
+        self.call("register", session_name="sender-1", session_id="other-sid")
+        self._peer_msg(self._wrap("sender-1"), session_id="unknown-sid",
+                       cwd="/nonexistent-cwd")
+        self.assertEqual(self.events(event="peer_message"), [])
+
     def test_roster_max_cap(self):
         for i in range(5):
             self.call("register", session_name=f"peer-{i}", session_id=f"o{i}")

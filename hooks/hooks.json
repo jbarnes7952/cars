@@ -10,6 +10,12 @@
           },
           {
             "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/peer-message.sh\"",
+            "timeout": 10,
+            "async": true
+          },
+          {
+            "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat.sh\"",
             "timeout": 10,
             "async": true

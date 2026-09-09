@@ -53,10 +53,44 @@ SQLite database at `~/.claude-ledger/ledger.db`. WAL mode. Two tables:
 | ts | TEXT (ISO 8601 UTC) |
 | session_name | TEXT |
 | session_id | TEXT |
-| event | TEXT — `register` \| `update` \| `heartbeat` \| `deregister` \| `evicted` |
+| event | TEXT — `register` \| `update` \| `heartbeat` \| `deregister` \| `evicted` \| `peer_message` |
 | payload | TEXT — JSON snapshot of the fields written |
 
 Every mutation of `agents` writes a corresponding `events` row in the same transaction. Heartbeat events may be sampled (write at most one heartbeat event per session per 5 minutes) to keep the table small; all other event types are always written. The sample bucket is (`session_name`, `via`), so a session heartbeat by both its own hooks and a supervisor keeps one event per channel per window rather than letting the first arrival suppress the other.
+
+## `peer_message`
+
+Written by the RECEIVER of a cross-session message, from a UserPromptSubmit
+hook, so that a consumer can draw traffic between agents. Payload is
+`{"from": "<sender address>", "to": "<receiver session_name>"}` — endpoints
+and the event timestamp, nothing else. Never the body, never its length,
+never a subject: a table every session on the machine can read is the wrong
+home for message content, and the field should not exist rather than exist
+and tempt.
+
+This is the only event whose subject is not its author. `register`, `update`,
+`heartbeat` and `deregister` are self-reported; `evicted` is the ledger's own
+act. A `peer_message` row is **the receiver's claim about a third party**,
+inferred from the text of an incoming turn. Nothing verifies it, and on a
+single-user machine nothing needs to — but read these rows as a weaker record
+than the rest of the table, not an equal one.
+
+Two guards keep the inference as honest as it can be:
+
+1. The `<cross-session-message` wrapper must sit at offset 0 of the prompt.
+   The genuine wrapper is prepended by the harness, so anything quoting one is
+   necessarily later in the text. Without this a sender could forge an edge by
+   quoting a wrapper naming someone else in its own message body.
+2. The sender must already be registered. An unknown address writes no row at
+   all, so junk never enters the table rather than being filtered by whoever
+   reads it.
+
+Unsampled: the interesting case is a burst and thinning would hide exactly
+that. It stays small by being rare. Cap it before thinning it.
+
+Recording that a message arrived is not transport. The ledger still never
+carries, queues or routes anything — the message has already been delivered by
+the time the hook sees it.
 
 ## Staleness
 

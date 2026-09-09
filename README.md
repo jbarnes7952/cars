@@ -24,6 +24,7 @@ skills/
   register/SKILL.md            /register — in-session manual upsert (current mode)
   deregister/SKILL.md          /deregister — in-session manual removal
 hooks/
+  peer-message.sh              UserPromptSubmit → log that a peer message arrived (wired)
   roster-inject.sh <channel>   UserPromptSubmit/PostToolUse → periodic peer-roster context push (wired)
                                <channel> is `prompt` or `tool`; the cadence is gated in shell
                                so python3 only starts on a firing tick
@@ -301,6 +302,23 @@ stop, and left a state file behind each time.
 | `register` | upsert full record (re-registering a name replaces the row) |
 | `update_registration` | partial update of `role`/`capabilities`/`query_me_when`/`status`/`project` |
 | `heartbeat` | bump `last_seen` only; optional `via` marks a supervisor heartbeating for a child |
+
+### Message traffic (`peer_message`)
+
+`hooks/peer-message.sh` records that a cross-session message arrived, so a
+consumer can draw traffic between agents. It stores **endpoints and a timestamp
+only** — `{"from": …, "to": …}`. Never the body, never its length, never a
+subject.
+
+**This hook reads prompt content.** Every other cars hook looks only at
+`session_id`, `cwd`, `session_title` and the event name. This one pattern-matches
+the start of each submitted prompt to spot the `<cross-session-message` wrapper.
+Nothing from the prompt is stored beyond the sender's directory address, but the
+hook does inspect what you type. Remove it from `hooks.json` if that is not a
+trade you want; nothing else in cars depends on it.
+
+The wrapper must sit at offset 0 and the sender must already be registered, or
+no row is written — see `SPEC.md` for why both guards are load-bearing.
 | `find_agents` | free-text match across descriptive fields → returns `session_name` addresses |
 | `list_agents_detailed` | all records |
 | `deregister` | delete row (idempotent) |

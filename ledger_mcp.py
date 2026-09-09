@@ -1036,6 +1036,70 @@ def _roster_state_dir():
     return os.path.join(os.path.dirname(DB_PATH), "roster-state")
 
 
+# The wrapper the harness puts around an inbound cross-session message. Matched
+# only at the very start of the prompt: the genuine wrapper is prepended by the
+# harness, so anything quoting one is necessarily later in the text. Without
+# that anchor a sender could forge an edge by quoting a wrapper in its own
+# message body, and a pasted transcript could invent one by accident.
+PEER_MSG_TAG = "<cross-session-message"
+_PEER_FROM_RE = re.compile(r'\sfrom="([^"]*)"')
+
+
+def hook_peer_message():
+    """UserPromptSubmit hook: record that a peer message arrived here.
+
+    Endpoints and a timestamp, never the body -- a table every session on the
+    machine can read is the last place message content should live.
+
+    This is the only event whose subject is not its author. register, update,
+    heartbeat and deregister are self-reported; evicted is the ledger's own
+    act. This row is the RECEIVER's claim about a third party, inferred from
+    text, and nothing verifies it afterwards. Two guards keep it as honest as
+    an inference can be: the wrapper must sit at offset 0, and the sender must
+    already be in the directory or no row is written at all -- junk never
+    enters the table rather than being filtered by whoever reads it.
+
+    Unsampled by design: the interesting case is a burst, and thinning would
+    hide exactly that. It stays small by being rare.
+    """
+    hook = read_hook_input()
+    prompt = (hook.get("prompt") or "").lstrip()
+    if not prompt.startswith(PEER_MSG_TAG):
+        return
+    tag = prompt[:prompt.find(">") + 1] if ">" in prompt else ""
+    match = _PEER_FROM_RE.search(tag)
+    if not match:
+        return
+    sender = match.group(1).strip()
+    if not sender:
+        return
+
+    own = find_own_row(hook)
+    if own is None:
+        return
+    receiver = own["session_name"]
+    if sender == receiver:
+        return
+
+    try:
+        conn = connect()
+    except Exception:
+        return
+    try:
+        # An unregistered sender is not written. seat would refuse to draw a
+        # node for it anyway; better that it never reaches the table.
+        known = conn.execute(
+            "SELECT 1 FROM agents WHERE session_name = ?", (sender,)
+        ).fetchone()
+        if not known:
+            return
+        write_event(conn, receiver, own["session_id"], "peer_message",
+                    {"from": sender, "to": receiver})
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def hook_roster():
     """Roster/nudge injection on a dual cadence.
 
@@ -1201,6 +1265,11 @@ def main():
     elif cmd == "hook-heartbeat":
         try:
             hook_heartbeat()
+        except Exception:
+            pass  # a dead ledger must never disturb the session
+    elif cmd == "hook-peer-message":
+        try:
+            hook_peer_message()
         except Exception:
             pass  # a dead ledger must never disturb the session
     elif cmd == "hook-roster":
