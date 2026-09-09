@@ -343,7 +343,10 @@ python3 ledger_mcp.py events --event peer_message --since 2026-09-09T00:00:00Z -
 ```
 
 Rows come oldest first, which is what a cursor wants: pass the last `ts` you
-saw back as `--since` and drain in order with nothing skipped. It also means
+saw back as `--since` and drain in order with nothing skipped. `--since` takes
+any ISO 8601 instant at any precision, with `Z` or a numeric offset, and
+normalises it, so a synthesised bound like "one minute ago" selects the same
+rows however you format it. It also means
 `--limit` drops the *newest* rows, so `--limit 20` gives the twenty least
 recent — check `truncated` to tell a partial answer from a quiet fleet.
 

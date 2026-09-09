@@ -883,6 +883,49 @@ class LedgerTest(unittest.TestCase):
         self.assertTrue(capped["truncated"])
         self.assertEqual(capped["events"][0]["ts"], first_ts)
 
+    def _seed_events(self, *timestamps):
+        con = sqlite3.connect(self.db)
+        for ts in timestamps:
+            con.execute(
+                "insert into events (ts, session_name, session_id, event, payload)"
+                " values (?, ?, ?, ?, ?)",
+                (ts, "me", "s", "peer_message",
+                 json.dumps({"from": "a", "to": "me"})))
+        con.commit()
+        con.close()
+
+    def _since_count(self, since):
+        return json.loads(self._cli("events", "--event", "peer_message",
+                                    "--since", since, "--json").stdout)["count"]
+
+    def test_events_since_equivalent_instants_agree(self):
+        """`ts` is compared as a string, so an unnormalised bound made
+        equivalent representations disagree: 'Z' sorts above '.', which put
+        second-precision "…04Z" *after* "…04.304Z" and dropped it, while
+        "…04+00:00" sorted before it and kept it."""
+        self.call("register", session_name="a")
+        self._seed_events("2026-09-09T17:25:04.304Z", "2026-09-09T17:25:51.995Z")
+        same_instant = ["2026-09-09T17:25:04Z",
+                        "2026-09-09T17:25:04+00:00",
+                        "2026-09-09T13:25:04-04:00"]
+        counts = {s: self._since_count(s) for s in same_instant}
+        self.assertEqual(set(counts.values()), {2}, counts)
+
+    def test_events_since_exact_cursor_stays_exclusive(self):
+        """Normalising must not break the cursor: the row you pass back is
+        still excluded."""
+        self.call("register", session_name="a")
+        self._seed_events("2026-09-09T17:25:04.304Z", "2026-09-09T17:25:51.995Z")
+        self.assertEqual(self._since_count("2026-09-09T17:25:04.304Z"), 1)
+
+    def test_events_since_rejects_unparseable_bound(self):
+        """Garbage must error, not filter lexicographically on nonsense."""
+        self.call("register", session_name="a")
+        out = self._cli("events", "--event", "peer_message",
+                        "--since", "not-a-time", "--json")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("not a valid ISO 8601", out.stderr)
+
     def test_events_truncated_is_false_when_all_rows_fit(self):
         """Exactly-limit rows with nothing beyond must not claim truncation."""
         self._setup_pair()

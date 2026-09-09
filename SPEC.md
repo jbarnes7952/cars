@@ -128,6 +128,13 @@ the time the hook sees it.
 oldest first, `since` exclusive. Indexed on `(event, ts)`; the older index
 leads on `session_name` and cannot serve this scan.
 
+`--since` accepts any ISO 8601 instant — any precision, `Z` or a numeric
+offset — and is normalised to the stored format before comparison, so
+equivalent representations always select the same rows. An unparseable bound
+is an error rather than a filter. (Timestamps are compared as strings, so
+without normalisation `…04Z` sorted *after* `…04.304Z` while `…04+00:00`
+sorted before it, and the same instant written two ways gave two answers.)
+
 Oldest first is for the cursor caller: pass back the last `ts` seen and rows
 drain in order with nothing skipped. That decides which end `limit` truncates —
 it drops the **newest** rows, so `--limit 20` is the twenty *least* recent, not
