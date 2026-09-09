@@ -652,6 +652,135 @@ class LedgerTest(unittest.TestCase):
             capture_output=True, text=True, env=env)
         self.assertEqual(proc.returncode, 0)
 
+    # ---------------------------------------------------------- peer_message
+
+    def _peer_msg(self, prompt, session_id="me-sid", cwd="/tmp"):
+        """Drive the hook exactly as UserPromptSubmit would."""
+        return subprocess.run(
+            [sys.executable, SERVER, "hook-peer-message"],
+            input=json.dumps({"session_id": session_id, "cwd": cwd,
+                              "hook_event_name": "UserPromptSubmit",
+                              "prompt": prompt}),
+            capture_output=True, text=True, env=os.environ.copy())
+
+    def _wrap(self, sender, body="hello"):
+        return f'<cross-session-message from="{sender}" from-name="x">{body}</cross-session-message>'
+
+    def _setup_pair(self):
+        self.call("register", session_name="sender-1", session_id="other-sid")
+        self.call("register", session_name="me", session_id="me-sid", cwd="/tmp")
+
+    def test_peer_message_records_endpoints_only(self):
+        self._setup_pair()
+        self._peer_msg(self._wrap("sender-1", "some secret body text"))
+        evs = self.events(event="peer_message")
+        self.assertEqual(len(evs), 1)
+        payload = json.loads(evs[0]["payload"])
+        self.assertEqual(payload, {"from": "sender-1", "to": "me"})
+        # the body must not appear anywhere in the row
+        self.assertNotIn("secret", evs[0]["payload"])
+
+    def test_peer_message_ignores_quoted_wrapper_in_body(self):
+        """The spoof: a sender forging an edge by quoting a wrapper."""
+        self._setup_pair()
+        self.call("register", session_name="victim", session_id="v-sid")
+        forged = self._wrap("sender-1", 'look: ' + self._wrap("victim"))
+        self._peer_msg(forged)
+        evs = self.events(event="peer_message")
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(json.loads(evs[0]["payload"])["from"], "sender-1",
+                         "must take the anchored wrapper, never a quoted one")
+
+    def test_peer_message_ignores_wrapper_not_at_offset_zero(self):
+        """A pasted transcript must not invent an edge."""
+        self._setup_pair()
+        self._peer_msg("here is a log I pasted:\n" + self._wrap("sender-1"))
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_peer_message_drops_unregistered_sender(self):
+        """Junk never enters the table rather than being filtered at read."""
+        self.call("register", session_name="me", session_id="me-sid", cwd="/tmp")
+        self._peer_msg(self._wrap("uds:/run/user/1000/cc-socks/ghost.sock"))
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_peer_message_ignores_ordinary_prompts(self):
+        self._setup_pair()
+        self._peer_msg("just a normal question about cross-session-message stuff")
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_peer_message_unsampled(self):
+        """Bursts are the interesting case, so nothing thins them."""
+        self._setup_pair()
+        for _ in range(4):
+            self._peer_msg(self._wrap("sender-1"))
+        self.assertEqual(len(self.events(event="peer_message")), 4)
+
+    def test_peer_message_needs_a_receiver_row(self):
+        """An unregistered receiver cannot claim anything."""
+        self.call("register", session_name="sender-1", session_id="other-sid")
+        self._peer_msg(self._wrap("sender-1"), session_id="unknown-sid",
+                       cwd="/nonexistent-cwd")
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_events_reader_returns_flattened_endpoints(self):
+        self._setup_pair()
+        self._peer_msg(self._wrap("sender-1"))
+        out = self._cli("events", "--event", "peer_message", "--json")
+        result = json.loads(out.stdout)
+        self.assertEqual(result["count"], 1)
+        row = result["events"][0]
+        self.assertEqual(row["from"], "sender-1")
+        self.assertEqual(row["to"], "me")
+        self.assertIn("ts", row)
+
+    def test_events_reader_refuses_other_event_types(self):
+        """register/update payloads carry free-text status; not readable."""
+        self.call("register", session_name="peer-x", status="something private")
+        for ev in ("register", "update", "heartbeat", "deregister", "evicted"):
+            out = self._cli("events", "--event", ev, "--json")
+            self.assertEqual(out.returncode, 2, f"{ev} must not be readable")
+            self.assertIn("not readable", out.stderr)
+            self.assertNotIn("something private", out.stdout)
+
+    def test_events_reader_since_is_exclusive_and_limit_caps(self):
+        self._setup_pair()
+        for _ in range(3):
+            self._peer_msg(self._wrap("sender-1"))
+        allrows = json.loads(
+            self._cli("events", "--event", "peer_message", "--json").stdout)
+        self.assertEqual(allrows["count"], 3)
+        first_ts = allrows["events"][0]["ts"]
+        after = json.loads(self._cli("events", "--event", "peer_message",
+                                     "--since", first_ts, "--json").stdout)
+        self.assertTrue(all(e["ts"] > first_ts for e in after["events"]))
+        self.assertLess(after["count"], 3)
+        capped = json.loads(self._cli("events", "--event", "peer_message",
+                                      "--limit", "1", "--json").stdout)
+        self.assertEqual(capped["count"], 1)
+        # limit drops the NEWEST rows, so the one returned is the oldest,
+        # and the caller is told there were more.
+        self.assertTrue(capped["truncated"])
+        self.assertEqual(capped["events"][0]["ts"], first_ts)
+
+    def test_events_truncated_is_false_when_all_rows_fit(self):
+        """Exactly-limit rows with nothing beyond must not claim truncation."""
+        self._setup_pair()
+        for _ in range(2):
+            self._peer_msg(self._wrap("sender-1"))
+        exact = json.loads(self._cli("events", "--event", "peer_message",
+                                     "--limit", "2", "--json").stdout)
+        self.assertEqual(exact["count"], 2)
+        self.assertFalse(exact["truncated"])
+
+    def test_events_index_is_created_in_place(self):
+        """An existing db predating the index must gain it on connect."""
+        self.call("register", session_name="anyone")
+        con = sqlite3.connect(self.db)
+        names = [r[0] for r in con.execute(
+            "select name from sqlite_master where type='index'")]
+        con.close()
+        self.assertIn("idx_events_event_ts", names)
+
     def test_roster_max_cap(self):
         for i in range(5):
             self.call("register", session_name=f"peer-{i}", session_id=f"o{i}")

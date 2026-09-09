@@ -11,6 +11,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "/path/to/cars/hooks/peer-message.sh",
+            "timeout": 10,
+            "async": true
+          },
+          {
+            "type": "command",
             "command": "/path/to/cars/hooks/roster-inject.sh prompt",
             "timeout": 10
           }

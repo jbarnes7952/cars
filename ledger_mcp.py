@@ -16,6 +16,15 @@ Usage:
                                    last_seen (hook JSON on stdin)
     ledger_mcp.py roster           print the roster text (debug/preview)
     ledger_mcp.py self-address     print this session's uds: transport address
+    ledger_mcp.py events --event peer_message [--since ISO8601]
+                                   [--limit N] [--json]
+                                   read back recorded message traffic; only
+                                   event types in READABLE_EVENTS are exposed.
+                                   OLDEST FIRST: --limit drops the newest
+                                   rows, not the oldest, so `--limit 20` is
+                                   the 20 least recent. Pass the last ts seen
+                                   as --since to drain in order; `truncated`
+                                   in the result means more rows matched.
     ledger_mcp.py list [--stale] [--json]
                                    pretty-print (or dump) registered agents
     ledger_mcp.py register         directory ops from the command line: the
@@ -91,6 +100,11 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_session_event_ts
     ON events (session_name, event, ts);
+
+-- The index above leads on session_name, so it cannot serve a scan filtered
+-- by event type over a time range. Reading traffic back needs this one.
+CREATE INDEX IF NOT EXISTS idx_events_event_ts
+    ON events (event, ts);
 """
 
 STALE_SECONDS = 10 * 60          # older than this => flagged stale
@@ -1036,6 +1050,158 @@ def _roster_state_dir():
     return os.path.join(os.path.dirname(DB_PATH), "roster-state")
 
 
+# The wrapper the harness puts around an inbound cross-session message. Matched
+# only at the very start of the prompt: the genuine wrapper is prepended by the
+# harness, so anything quoting one is necessarily later in the text. Without
+# that anchor a sender could forge an edge by quoting a wrapper in its own
+# message body, and a pasted transcript could invent one by accident.
+PEER_MSG_TAG = "<cross-session-message"
+_PEER_FROM_RE = re.compile(r'\sfrom="([^"]*)"')
+
+
+def hook_peer_message():
+    """UserPromptSubmit hook: record that a peer message arrived here.
+
+    Endpoints and a timestamp, never the body -- a table every session on the
+    machine can read is the last place message content should live.
+
+    This is the only event whose subject is not its author. register, update,
+    heartbeat and deregister are self-reported; evicted is the ledger's own
+    act. This row is the RECEIVER's claim about a third party, inferred from
+    text, and nothing verifies it afterwards. Two guards keep it as honest as
+    an inference can be: the wrapper must sit at offset 0, and the sender must
+    already be in the directory or no row is written at all -- junk never
+    enters the table rather than being filtered by whoever reads it.
+
+    Unsampled by design: the interesting case is a burst, and thinning would
+    hide exactly that. It stays small by being rare.
+    """
+    hook = read_hook_input()
+    prompt = (hook.get("prompt") or "").lstrip()
+    if not prompt.startswith(PEER_MSG_TAG):
+        return
+    tag = prompt[:prompt.find(">") + 1] if ">" in prompt else ""
+    match = _PEER_FROM_RE.search(tag)
+    if not match:
+        return
+    sender = match.group(1).strip()
+    if not sender:
+        return
+
+    own = find_own_row(hook)
+    if own is None:
+        return
+    receiver = own["session_name"]
+    if sender == receiver:
+        return
+
+    try:
+        conn = connect()
+    except Exception:
+        return
+    try:
+        # An unregistered sender is not written. seat would refuse to draw a
+        # node for it anyway; better that it never reaches the table.
+        known = conn.execute(
+            "SELECT 1 FROM agents WHERE session_name = ?", (sender,)
+        ).fetchone()
+        if not known:
+            return
+        write_event(conn, receiver, own["session_id"], "peer_message",
+                    {"from": sender, "to": receiver})
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# Event names the `events` verb will return. Deliberately not "any event":
+# register and update payloads carry status and role strings people write
+# freely, and a reader for drawing traffic has no business exposing those.
+# Widen this only for event types whose payload is known to be endpoints.
+READABLE_EVENTS = ("peer_message",)
+
+EVENTS_LIMIT_DEFAULT = 500
+EVENTS_LIMIT_MAX = 5000
+
+
+def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
+    """Rows of one readable event type, oldest first, `since` exclusive.
+
+    Payload keys are flattened onto the row, so a caller drawing traffic gets
+    {"ts", "from", "to"} rather than a JSON string to parse itself.
+
+    Oldest first is for the cursor caller: pass back the last `ts` seen and
+    rows drain in order with nothing skipped. That fixes which end `limit`
+    truncates -- it drops the NEWEST rows, not the oldest. A caller wanting
+    "the 20 most recent" will get the 20 least recent instead, so the result
+    carries `truncated` to say more rows matched than were returned. Truncating
+    the other way would let a cursor caller silently skip everything between
+    its cursor and the newest page, which is the worse failure.
+    """
+    if event not in READABLE_EVENTS:
+        raise ToolError(
+            f"event type not readable: {event}"
+            f" (readable: {', '.join(READABLE_EVENTS)})")
+    try:
+        limit = max(1, min(int(limit), EVENTS_LIMIT_MAX))
+    except (TypeError, ValueError):
+        limit = EVENTS_LIMIT_DEFAULT
+    sql = "SELECT ts, payload FROM events WHERE event = ?"
+    args = [event]
+    if since:
+        sql += " AND ts > ?"
+        args.append(since)
+    # One more than asked, to report truncation exactly rather than guessing
+    # from a full page.
+    sql += " ORDER BY ts LIMIT ?"
+    args.append(limit + 1)
+    conn = connect()
+    try:
+        rows = conn.execute(sql, tuple(args)).fetchall()
+    finally:
+        conn.close()
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    out = []
+    for r in rows:
+        rec = {"ts": r["ts"]}
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        if isinstance(payload, dict):
+            rec.update(payload)
+        out.append(rec)
+    return {"events": out, "count": len(out), "truncated": truncated}
+
+
+def cli_events(argv):
+    """events --event peer_message [--since ISO] [--limit N] [--json]"""
+    def opt(name, default=None):
+        if name in argv:
+            i = argv.index(name)
+            if i + 1 < len(argv):
+                return argv[i + 1]
+        return default
+    event = opt("--event", READABLE_EVENTS[0])
+    since = opt("--since")
+    limit = opt("--limit", EVENTS_LIMIT_DEFAULT)
+    try:
+        result = read_events(event, since, limit)
+    except ToolError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        sys.exit(2)
+    if "--json" in argv:
+        print(json.dumps(result))
+        return
+    if not result["events"]:
+        print("no events")
+        return
+    for e in result["events"]:
+        extra = " ".join(f"{k}={v}" for k, v in e.items() if k != "ts")
+        print(f"{e['ts']}  {extra}")
+
+
 def hook_roster():
     """Roster/nudge injection on a dual cadence.
 
@@ -1203,6 +1369,11 @@ def main():
             hook_heartbeat()
         except Exception:
             pass  # a dead ledger must never disturb the session
+    elif cmd == "hook-peer-message":
+        try:
+            hook_peer_message()
+        except Exception:
+            pass  # a dead ledger must never disturb the session
     elif cmd == "hook-roster":
         try:
             hook_roster()
@@ -1214,6 +1385,8 @@ def main():
         print(self_address() or "")
     elif cmd == "list":
         cli_list("--stale" in sys.argv[2:], "--json" in sys.argv[2:])
+    elif cmd == "events":
+        cli_events(sys.argv[2:])
     elif cmd in CLI_TOOLS:
         cli_call(cmd, sys.argv[2:])
     else:
