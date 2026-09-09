@@ -16,6 +16,10 @@ Usage:
                                    last_seen (hook JSON on stdin)
     ledger_mcp.py roster           print the roster text (debug/preview)
     ledger_mcp.py self-address     print this session's uds: transport address
+    ledger_mcp.py events --event peer_message [--since ISO8601]
+                                   [--limit N] [--json]
+                                   read back recorded message traffic; only
+                                   event types in READABLE_EVENTS are exposed
     ledger_mcp.py list [--stale] [--json]
                                    pretty-print (or dump) registered agents
     ledger_mcp.py register         directory ops from the command line: the
@@ -91,6 +95,11 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_session_event_ts
     ON events (session_name, event, ts);
+
+-- The index above leads on session_name, so it cannot serve a scan filtered
+-- by event type over a time range. Reading traffic back needs this one.
+CREATE INDEX IF NOT EXISTS idx_events_event_ts
+    ON events (event, ts);
 """
 
 STALE_SECONDS = 10 * 60          # older than this => flagged stale
@@ -1100,6 +1109,82 @@ def hook_peer_message():
         conn.close()
 
 
+# Event names the `events` verb will return. Deliberately not "any event":
+# register and update payloads carry status and role strings people write
+# freely, and a reader for drawing traffic has no business exposing those.
+# Widen this only for event types whose payload is known to be endpoints.
+READABLE_EVENTS = ("peer_message",)
+
+EVENTS_LIMIT_DEFAULT = 500
+EVENTS_LIMIT_MAX = 5000
+
+
+def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
+    """Rows of one readable event type, oldest first, `since` exclusive.
+
+    Payload keys are flattened onto the row, so a caller drawing traffic gets
+    {"ts", "from", "to"} rather than a JSON string to parse itself.
+    """
+    if event not in READABLE_EVENTS:
+        raise ToolError(
+            f"event type not readable: {event}"
+            f" (readable: {', '.join(READABLE_EVENTS)})")
+    try:
+        limit = max(1, min(int(limit), EVENTS_LIMIT_MAX))
+    except (TypeError, ValueError):
+        limit = EVENTS_LIMIT_DEFAULT
+    sql = "SELECT ts, payload FROM events WHERE event = ?"
+    args = [event]
+    if since:
+        sql += " AND ts > ?"
+        args.append(since)
+    sql += " ORDER BY ts LIMIT ?"
+    args.append(limit)
+    conn = connect()
+    try:
+        rows = conn.execute(sql, tuple(args)).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        rec = {"ts": r["ts"]}
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        if isinstance(payload, dict):
+            rec.update(payload)
+        out.append(rec)
+    return {"events": out, "count": len(out)}
+
+
+def cli_events(argv):
+    """events --event peer_message [--since ISO] [--limit N] [--json]"""
+    def opt(name, default=None):
+        if name in argv:
+            i = argv.index(name)
+            if i + 1 < len(argv):
+                return argv[i + 1]
+        return default
+    event = opt("--event", READABLE_EVENTS[0])
+    since = opt("--since")
+    limit = opt("--limit", EVENTS_LIMIT_DEFAULT)
+    try:
+        result = read_events(event, since, limit)
+    except ToolError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        sys.exit(2)
+    if "--json" in argv:
+        print(json.dumps(result))
+        return
+    if not result["events"]:
+        print("no events")
+        return
+    for e in result["events"]:
+        extra = " ".join(f"{k}={v}" for k, v in e.items() if k != "ts")
+        print(f"{e['ts']}  {extra}")
+
+
 def hook_roster():
     """Roster/nudge injection on a dual cadence.
 
@@ -1283,6 +1368,8 @@ def main():
         print(self_address() or "")
     elif cmd == "list":
         cli_list("--stale" in sys.argv[2:], "--json" in sys.argv[2:])
+    elif cmd == "events":
+        cli_events(sys.argv[2:])
     elif cmd in CLI_TOOLS:
         cli_call(cmd, sys.argv[2:])
     else:

@@ -92,6 +92,23 @@ Recording that a message arrived is not transport. The ledger still never
 carries, queues or routes anything — the message has already been delivered by
 the time the hook sees it.
 
+### Reading it back
+
+`ledger_mcp.py events --event peer_message [--since ISO8601] [--limit N]
+[--json]` returns `{"events": [{"ts", "from", "to"}], "count"}`, oldest first,
+`since` exclusive. Indexed on `(event, ts)`; the older index leads on
+`session_name` and cannot serve this scan.
+
+Only event types on an explicit allowlist are readable, currently
+`peer_message` alone. `register` and `update` payloads carry role and status
+strings people write freely, and a reader meant for drawing traffic has no
+business exposing them. Widen the allowlist only for event types whose payload
+is known to be endpoints.
+
+CLI only, deliberately. An MCP tool would load a description into every
+session's context for a niche a consumer reaches over the CLI anyway, and
+"who has been talking to whom" is not a directory function.
+
 ## Staleness
 
 - `last_seen` older than **10 minutes** ⇒ entry is *stale*. Query tools still return stale entries but flag them (`"stale": true`).

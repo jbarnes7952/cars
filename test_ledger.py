@@ -722,6 +722,51 @@ class LedgerTest(unittest.TestCase):
                        cwd="/nonexistent-cwd")
         self.assertEqual(self.events(event="peer_message"), [])
 
+    def test_events_reader_returns_flattened_endpoints(self):
+        self._setup_pair()
+        self._peer_msg(self._wrap("sender-1"))
+        out = self._cli("events", "--event", "peer_message", "--json")
+        result = json.loads(out.stdout)
+        self.assertEqual(result["count"], 1)
+        row = result["events"][0]
+        self.assertEqual(row["from"], "sender-1")
+        self.assertEqual(row["to"], "me")
+        self.assertIn("ts", row)
+
+    def test_events_reader_refuses_other_event_types(self):
+        """register/update payloads carry free-text status; not readable."""
+        self.call("register", session_name="peer-x", status="something private")
+        for ev in ("register", "update", "heartbeat", "deregister", "evicted"):
+            out = self._cli("events", "--event", ev, "--json")
+            self.assertEqual(out.returncode, 2, f"{ev} must not be readable")
+            self.assertIn("not readable", out.stderr)
+            self.assertNotIn("something private", out.stdout)
+
+    def test_events_reader_since_is_exclusive_and_limit_caps(self):
+        self._setup_pair()
+        for _ in range(3):
+            self._peer_msg(self._wrap("sender-1"))
+        allrows = json.loads(
+            self._cli("events", "--event", "peer_message", "--json").stdout)
+        self.assertEqual(allrows["count"], 3)
+        first_ts = allrows["events"][0]["ts"]
+        after = json.loads(self._cli("events", "--event", "peer_message",
+                                     "--since", first_ts, "--json").stdout)
+        self.assertTrue(all(e["ts"] > first_ts for e in after["events"]))
+        self.assertLess(after["count"], 3)
+        capped = json.loads(self._cli("events", "--event", "peer_message",
+                                      "--limit", "1", "--json").stdout)
+        self.assertEqual(capped["count"], 1)
+
+    def test_events_index_is_created_in_place(self):
+        """An existing db predating the index must gain it on connect."""
+        self.call("register", session_name="anyone")
+        con = sqlite3.connect(self.db)
+        names = [r[0] for r in con.execute(
+            "select name from sqlite_master where type='index'")]
+        con.close()
+        self.assertIn("idx_events_event_ts", names)
+
     def test_roster_max_cap(self):
         for i in range(5):
             self.call("register", session_name=f"peer-{i}", session_id=f"o{i}")

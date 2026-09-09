@@ -27,3 +27,8 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_session_event_ts
     ON events (session_name, event, ts);
+
+-- The index above leads on session_name, so it cannot serve a scan filtered
+-- by event type over a time range. Reading traffic back needs this one.
+CREATE INDEX IF NOT EXISTS idx_events_event_ts
+    ON events (event, ts);
