@@ -19,7 +19,12 @@ Usage:
     ledger_mcp.py events --event peer_message [--since ISO8601]
                                    [--limit N] [--json]
                                    read back recorded message traffic; only
-                                   event types in READABLE_EVENTS are exposed
+                                   event types in READABLE_EVENTS are exposed.
+                                   OLDEST FIRST: --limit drops the newest
+                                   rows, not the oldest, so `--limit 20` is
+                                   the 20 least recent. Pass the last ts seen
+                                   as --since to drain in order; `truncated`
+                                   in the result means more rows matched.
     ledger_mcp.py list [--stale] [--json]
                                    pretty-print (or dump) registered agents
     ledger_mcp.py register         directory ops from the command line: the
@@ -1124,6 +1129,14 @@ def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
 
     Payload keys are flattened onto the row, so a caller drawing traffic gets
     {"ts", "from", "to"} rather than a JSON string to parse itself.
+
+    Oldest first is for the cursor caller: pass back the last `ts` seen and
+    rows drain in order with nothing skipped. That fixes which end `limit`
+    truncates -- it drops the NEWEST rows, not the oldest. A caller wanting
+    "the 20 most recent" will get the 20 least recent instead, so the result
+    carries `truncated` to say more rows matched than were returned. Truncating
+    the other way would let a cursor caller silently skip everything between
+    its cursor and the newest page, which is the worse failure.
     """
     if event not in READABLE_EVENTS:
         raise ToolError(
@@ -1138,13 +1151,17 @@ def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
     if since:
         sql += " AND ts > ?"
         args.append(since)
+    # One more than asked, to report truncation exactly rather than guessing
+    # from a full page.
     sql += " ORDER BY ts LIMIT ?"
-    args.append(limit)
+    args.append(limit + 1)
     conn = connect()
     try:
         rows = conn.execute(sql, tuple(args)).fetchall()
     finally:
         conn.close()
+    truncated = len(rows) > limit
+    rows = rows[:limit]
     out = []
     for r in rows:
         rec = {"ts": r["ts"]}
@@ -1155,7 +1172,7 @@ def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
         if isinstance(payload, dict):
             rec.update(payload)
         out.append(rec)
-    return {"events": out, "count": len(out)}
+    return {"events": out, "count": len(out), "truncated": truncated}
 
 
 def cli_events(argv):

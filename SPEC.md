@@ -95,9 +95,18 @@ the time the hook sees it.
 ### Reading it back
 
 `ledger_mcp.py events --event peer_message [--since ISO8601] [--limit N]
-[--json]` returns `{"events": [{"ts", "from", "to"}], "count"}`, oldest first,
-`since` exclusive. Indexed on `(event, ts)`; the older index leads on
-`session_name` and cannot serve this scan.
+[--json]` returns `{"events": [{"ts", "from", "to"}], "count", "truncated"}`,
+oldest first, `since` exclusive. Indexed on `(event, ts)`; the older index
+leads on `session_name` and cannot serve this scan.
+
+Oldest first is for the cursor caller: pass back the last `ts` seen and rows
+drain in order with nothing skipped. That decides which end `limit` truncates —
+it drops the **newest** rows, so `--limit 20` is the twenty *least* recent, not
+the most recent. `truncated` says more rows matched than were returned, so a
+cold-start caller asking for a recent window can tell it got a partial answer
+instead of silently drawing stale traffic. Truncating the other way would let a
+cursor caller skip everything between its cursor and the newest page, which is
+the worse failure.
 
 Only event types on an explicit allowlist are readable, currently
 `peer_message` alone. `register` and `update` payloads carry role and status

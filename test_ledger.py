@@ -757,6 +757,20 @@ class LedgerTest(unittest.TestCase):
         capped = json.loads(self._cli("events", "--event", "peer_message",
                                       "--limit", "1", "--json").stdout)
         self.assertEqual(capped["count"], 1)
+        # limit drops the NEWEST rows, so the one returned is the oldest,
+        # and the caller is told there were more.
+        self.assertTrue(capped["truncated"])
+        self.assertEqual(capped["events"][0]["ts"], first_ts)
+
+    def test_events_truncated_is_false_when_all_rows_fit(self):
+        """Exactly-limit rows with nothing beyond must not claim truncation."""
+        self._setup_pair()
+        for _ in range(2):
+            self._peer_msg(self._wrap("sender-1"))
+        exact = json.loads(self._cli("events", "--event", "peer_message",
+                                     "--limit", "2", "--json").stdout)
+        self.assertEqual(exact["count"], 2)
+        self.assertFalse(exact["truncated"])
 
     def test_events_index_is_created_in_place(self):
         """An existing db predating the index must gain it on connect."""
