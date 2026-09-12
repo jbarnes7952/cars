@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS agents (
     tmux_pane     TEXT,               -- $TMUX_PANE at registration, if in tmux
     machine       TEXT,               -- hostname
     registered_at TEXT,               -- ISO 8601 UTC
-    last_seen     TEXT                -- ISO 8601 UTC, bumped on every write from that session
+    last_seen     TEXT,               -- ISO 8601 UTC, bumped on every write from that session
+    address       TEXT                -- uds: transport address, even when this
+                                      -- session registered under a chosen name
 );
 
 CREATE TABLE IF NOT EXISTS events (

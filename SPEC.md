@@ -44,6 +44,7 @@ SQLite database at `~/.claude-ledger/ledger.db`. WAL mode. Two tables:
 | machine | TEXT | hostname |
 | registered_at | TEXT | ISO 8601 UTC |
 | last_seen | TEXT | ISO 8601 UTC, bumped on every write from that session |
+| address | TEXT | `uds:` transport address, even when the session registered under a chosen name. Backfilled by the heartbeat hook, which runs inside the session it describes; `register` stores only what a caller states, since a spawner registering a child would derive its own address. |
 
 ### `events` (append-only, never updated or deleted)
 
@@ -94,9 +95,18 @@ Two guards keep the inference as honest as it can be:
    no allowance, which no genuine delivery has ever satisfied; the only rows
    written were from senders that wrote the frame themselves and put the
    wrapper first.
-2. The sender must already be registered. An unknown address writes no row at
-   all, so junk never enters the table rather than being filtered by whoever
-   reads it.
+2. The sender must resolve to a directory entry — by `session_name` **or**
+   `address` — or have a live socket on this machine. The address form matters:
+   a message names its sender by transport address, so matching `session_name`
+   alone recorded nothing at all for sessions registered under a chosen name.
+   A live socket is the same evidence `evict_stale` trusts to decide a session
+   is gone. A sender that is neither writes no row, so junk never enters the
+   table rather than being filtered by whoever reads it.
+
+When the sender resolves, the payload also carries `from_name` — the
+`session_name` — so a consumer needs no join. Note the asymmetry: `to` is
+always a `session_name` (resolved via `find_own_row`), while `from` is the
+address as observed. `address` makes either form resolvable.
 
 Unsampled: the interesting case is a burst and thinning would hide exactly
 that. It stays small by being rare. Cap it before thinning it.

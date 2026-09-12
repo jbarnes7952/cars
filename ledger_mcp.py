@@ -86,7 +86,8 @@ CREATE TABLE IF NOT EXISTS agents (
     tmux_pane     TEXT,
     machine       TEXT,
     registered_at TEXT,
-    last_seen     TEXT
+    last_seen     TEXT,
+    address       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -185,7 +186,7 @@ REGISTER_NUDGE = (
 AGENT_COLUMNS = [
     "session_name", "session_id", "pid", "cwd", "project", "role",
     "capabilities", "query_me_when", "status", "tmux_pane", "machine",
-    "registered_at", "last_seen",
+    "registered_at", "last_seen", "address",
 ]
 UPDATABLE_FIELDS = ["role", "capabilities", "query_me_when", "status", "project"]
 SEARCH_FIELDS = ["role", "capabilities", "query_me_when", "status", "project"]
@@ -222,6 +223,15 @@ def connect():
             conn.executescript(f.read())
     except OSError:
         conn.executescript(SCHEMA_SQL)
+    # CREATE TABLE IF NOT EXISTS will not add a column to a table that already
+    # exists, so columns added after v1 need an explicit guarded migration.
+    # This must run before any query: AGENT_COLUMNS drives every SELECT, so an
+    # un-migrated database would fail all of them, not just new code paths.
+    have = {r[1] for r in conn.execute("PRAGMA table_info(agents)")}
+    for column, decl in (("address", "TEXT"),):
+        if column not in have:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {column} {decl}")
+            conn.commit()
     return conn
 
 
@@ -309,6 +319,10 @@ def op_register(conn, args):
         "query_me_when": args.get("query_me_when") or "",
         "status": args.get("status") or "",
         "tmux_pane": args.get("tmux_pane") or "",
+        # Only ever what the caller states. Deriving it here would stamp a
+        # CLI-registered child with the spawner's address; hook_heartbeat
+        # backfills it from inside the session instead.
+        "address": args.get("address") or "",
         "machine": socket.gethostname(),
         "registered_at": now,
         "last_seen": now,
@@ -379,13 +393,15 @@ def op_heartbeat(conn, args):
     name = args["session_name"]
     sid = args.get("session_id") or ""
     via = (args.get("via") or "").strip()
+    addr = (args.get("address") or "").strip()
     now = now_iso()
     cur = conn.execute(
         "UPDATE agents SET last_seen = ? WHERE session_name = ?", (now, name)
     )
     if cur.rowcount:
         row = conn.execute(
-            "SELECT session_id FROM agents WHERE session_name = ?", (name,)
+            "SELECT session_id, address FROM agents WHERE session_name = ?",
+            (name,),
         ).fetchone()
         # Manual registrations don't know their session_id; backfill it from
         # the hook so self-matching (roster nudge, exclusion) becomes exact.
@@ -394,6 +410,17 @@ def op_heartbeat(conn, args):
             conn.execute(
                 "UPDATE agents SET session_id = ? WHERE session_name = ?",
                 (sid, name),
+            )
+        # Same backfill for the transport address. It is filled here rather
+        # than at registration because hook_heartbeat always runs inside the
+        # session it describes, so self_address() is trustworthy; a spawner
+        # registering a child by CLI would derive its OWN address instead.
+        # Never overwritten once set: a later caller is not better informed.
+        addr_backfilled = bool(addr and not row["address"])
+        if addr_backfilled:
+            conn.execute(
+                "UPDATE agents SET address = ? WHERE session_name = ?",
+                (addr, name),
             )
         # Sample heartbeat events: at most one per session per 5 minutes
         # (a backfill always writes one, so the audit log records it).
@@ -412,10 +439,13 @@ def op_heartbeat(conn, args):
             " AND IFNULL(json_extract(payload, '$.via'), '') = ?",
             (name, via),
         ).fetchone()["ts"]
-        if backfilled or last is None or age_seconds(last) > HEARTBEAT_SAMPLE_SECONDS:
+        if (backfilled or addr_backfilled or last is None
+                or age_seconds(last) > HEARTBEAT_SAMPLE_SECONDS):
             payload = {"last_seen": now}
             if backfilled:
                 payload["session_id_backfilled"] = sid
+            if addr_backfilled:
+                payload["address_backfilled"] = addr
             if via:
                 payload["via"] = via
             write_event(conn, name, sid or row["session_id"], "heartbeat", payload)
@@ -477,7 +507,7 @@ TOOLS = [
                 "session_id": STR, "cwd": STR, "role": STR,
                 "capabilities": CAPS, "query_me_when": STR, "status": STR,
                 "project": STR, "tmux_pane": STR,
-                "pid": {"type": "integer"}, "name_source": STR,
+                "pid": {"type": "integer"}, "name_source": STR, "address": STR,
             },
         },
         "handler": op_register,
@@ -500,7 +530,8 @@ TOOLS = [
         "description": "Mark this session as still alive (bumps last_seen). Pass via=<your name> when heartbeating for another session.",
         "inputSchema": {
             "type": "object",
-            "properties": {"session_name": STR, "session_id": STR, "via": STR},
+            "properties": {"session_name": STR, "session_id": STR, "via": STR,
+                           "address": STR},
             "required": ["session_name"],
         },
         "handler": op_heartbeat,
@@ -989,7 +1020,8 @@ def hook_heartbeat():
     if own is None:
         return
     call_tool("heartbeat", {"session_name": own["session_name"],
-                            "session_id": hook.get("session_id") or ""})
+                            "session_id": hook.get("session_id") or "",
+                            "address": self_address() or ""})
 
 
 FORCELOAD_NOTE = (
@@ -1105,8 +1137,9 @@ def hook_peer_message():
     act. This row is the RECEIVER's claim about a third party, inferred from
     text, and nothing verifies it afterwards. Two guards keep it as honest as
     an inference can be: the wrapper must be the first thing in the prompt
-    barring a lead-in the harness itself wrote, and the sender must already be
-    in the directory or no row is written at all -- junk never enters the
+    barring a lead-in the harness itself wrote, and the sender must either
+    resolve to a directory entry or have a live socket on this machine. A
+    sender that is neither writes no row at all -- junk never enters the
     table rather than being filtered by whoever reads it.
 
     Unsampled by design: the interesting case is a burst, and thinning would
@@ -1136,15 +1169,34 @@ def hook_peer_message():
     except Exception:
         return
     try:
-        # An unregistered sender is not written. seat would refuse to draw a
-        # node for it anyway; better that it never reaches the table.
-        known = conn.execute(
-            "SELECT 1 FROM agents WHERE session_name = ?", (sender,)
+        # The sender arrives as a transport address, but a session may have
+        # registered under a chosen name, so match either form. Requiring a
+        # session_name match alone silently dropped every chosen-name
+        # session's traffic -- quiet exactly where the fleet was busy.
+        row = conn.execute(
+            "SELECT session_name FROM agents"
+            " WHERE session_name = ? OR address = ?", (sender, sender),
         ).fetchone()
-        if not known:
+        from_name = row["session_name"] if row else ""
+
+        # A sender that resolves to nothing is still real if its socket is
+        # live: that is the same evidence evict_stale trusts to decide a
+        # session is gone, and the wrapper anchor already rules out one
+        # forged inside a message body. Unresolvable AND no socket means
+        # nothing worth recording, so junk still never enters.
+        live_socket = (sender.startswith("uds:")
+                       and os.path.exists(sender[4:]))
+        if not row and not live_socket:
             return
-        write_event(conn, receiver, own["session_id"], "peer_message",
-                    {"from": sender, "to": receiver})
+        # Self-messages are not traffic. Compare the resolved name too, or a
+        # chosen-name session would not match its own address.
+        if sender == receiver or from_name == receiver:
+            return
+
+        payload = {"from": sender, "to": receiver}
+        if from_name and from_name != sender:
+            payload["from_name"] = from_name
+        write_event(conn, receiver, own["session_id"], "peer_message", payload)
         conn.commit()
     finally:
         conn.close()

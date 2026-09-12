@@ -318,8 +318,15 @@ hook does inspect what you type. Remove it from `hooks.json` if that is not a
 trade you want; nothing else in cars depends on it.
 
 The wrapper must be the first thing in the prompt, barring the one line the
-harness writes above it, and the sender must already be registered, or no row is
-written — see `SPEC.md` for why both guards are load-bearing.
+harness writes above it, and the sender must resolve in the directory — by
+`session_name` **or** `address` — or have a live socket on this machine. A
+sender that is neither writes no row. See `SPEC.md` for why both guards are
+load-bearing.
+
+A message names its sender by transport address, so matching `session_name`
+alone recorded nothing for sessions registered under a chosen name. The
+`address` column closes that, and a resolved sender is reported as `from_name`
+so a consumer needs no join.
 
 **Only a message delivered as a prompt is recorded.** When a session is idle,
 an inbound message becomes its next prompt and this hook sees it. When a
