@@ -680,6 +680,96 @@ class LedgerTest(unittest.TestCase):
         # the body must not appear anywhere in the row
         self.assertNotIn("secret", evs[0]["payload"])
 
+    def test_peer_message_records_a_chosen_name_sender(self):
+        """The regression: a session registered under a chosen name sends
+        from a uds: address that never equals its session_name, so requiring
+        a session_name match dropped all of its traffic."""
+        self.call("register", session_name="orion", session_id="o-sid",
+                  address="uds:/run/user/1000/cc-socks/999001.sock")
+        self.call("register", session_name="me", session_id="me-sid", cwd="/tmp")
+        self._peer_msg(self._wrap("uds:/run/user/1000/cc-socks/999001.sock"))
+        evs = self.events(event="peer_message")
+        self.assertEqual(len(evs), 1)
+        payload = json.loads(evs[0]["payload"])
+        self.assertEqual(payload["from"],
+                         "uds:/run/user/1000/cc-socks/999001.sock")
+        self.assertEqual(payload["to"], "me")
+        self.assertEqual(payload["from_name"], "orion",
+                         "a resolved sender saves the consumer a join")
+
+    def test_peer_message_from_name_absent_when_sender_unresolved(self):
+        """A live socket is enough to record, but names nothing."""
+        self.call("register", session_name="me", session_id="me-sid", cwd="/tmp")
+        sock = self._bind_socket("stranger.sock")
+        self._peer_msg(self._wrap("uds:" + sock))
+        evs = self.events(event="peer_message")
+        self.assertEqual(len(evs), 1)
+        self.assertNotIn("from_name", json.loads(evs[0]["payload"]))
+
+    def test_peer_message_drops_sender_with_no_row_and_no_socket(self):
+        """Unresolvable and no live socket: junk still never enters."""
+        self.call("register", session_name="me", session_id="me-sid", cwd="/tmp")
+        self._peer_msg(self._wrap("uds:/run/user/1000/cc-socks/nope.sock"))
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_peer_message_ignores_self_by_address(self):
+        """A chosen-name session must not draw an edge to itself."""
+        self.call("register", session_name="me", session_id="me-sid", cwd="/tmp",
+                  address="uds:/run/user/1000/cc-socks/999002.sock")
+        self._peer_msg(self._wrap("uds:/run/user/1000/cc-socks/999002.sock"))
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_address_backfills_on_heartbeat_and_is_not_overwritten(self):
+        self.call("register", session_name="hb-addr", session_id="ha")
+        self.call("heartbeat", session_name="hb-addr",
+                  address="uds:/run/user/1000/cc-socks/111.sock")
+        rec = [a for a in self.call("list_agents_detailed")["agents"]
+               if a["session_name"] == "hb-addr"][0]
+        self.assertEqual(rec["address"], "uds:/run/user/1000/cc-socks/111.sock")
+        # a later caller is not better informed
+        self.call("heartbeat", session_name="hb-addr",
+                  address="uds:/run/user/1000/cc-socks/222.sock")
+        rec = [a for a in self.call("list_agents_detailed")["agents"]
+               if a["session_name"] == "hb-addr"][0]
+        self.assertEqual(rec["address"], "uds:/run/user/1000/cc-socks/111.sock")
+
+    def test_register_never_derives_an_address_itself(self):
+        """A spawner registering a child by CLI would derive its OWN address;
+        register must only ever store what the caller states."""
+        rec = self.call("register", session_name="child-x", session_id="cx")
+        self.assertEqual(rec["address"] or "", "")
+
+    def test_address_column_added_to_an_existing_database(self):
+        """A ledger predating the column must gain it on connect, and every
+        query must keep working -- AGENT_COLUMNS drives them all."""
+        # A ledger as it existed before the column, built from scratch.
+        con = sqlite3.connect(self.db)
+        con.executescript("""
+            CREATE TABLE agents (
+                session_name  TEXT PRIMARY KEY, session_id TEXT, pid INTEGER,
+                cwd TEXT, project TEXT, role TEXT, capabilities TEXT,
+                query_me_when TEXT, status TEXT, tmux_pane TEXT, machine TEXT,
+                registered_at TEXT, last_seen TEXT);
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT,
+                session_name TEXT, session_id TEXT, event TEXT, payload TEXT);
+            INSERT INTO agents (session_name, last_seen)
+                VALUES ('legacy-row', '2999-01-01T00:00:00.000Z');
+        """)
+        con.commit()
+        cols = {r[1] for r in con.execute("PRAGMA table_info(agents)")}
+        con.close()
+        self.assertNotIn("address", cols)
+        self.call("register", session_name="after-migrate")
+        names = {a["session_name"]
+                 for a in self.call("list_agents_detailed")["agents"]}
+        self.assertIn("after-migrate", names)
+        self.assertIn("legacy-row", names, "pre-existing rows must survive")
+        con = sqlite3.connect(self.db)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(agents)")}
+        con.close()
+        self.assertIn("address", cols)
+
     def test_peer_message_ignores_quoted_wrapper_in_body(self):
         """The spoof: a sender forging an edge by quoting a wrapper."""
         self._setup_pair()
