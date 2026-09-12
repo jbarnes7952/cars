@@ -77,16 +77,35 @@ than the rest of the table, not an equal one.
 
 Two guards keep the inference as honest as it can be:
 
-1. The `<cross-session-message` wrapper must sit at offset 0 of the prompt.
-   The genuine wrapper is prepended by the harness, so anything quoting one is
-   necessarily later in the text. Without this a sender could forge an edge by
-   quoting a wrapper naming someone else in its own message body.
+1. The `<cross-session-message` wrapper must be the first thing in the prompt,
+   allowing for one lead-in line the harness itself writes above it. The
+   genuine wrapper is prepended by the harness before any body the sender
+   controls, so anything quoting one is necessarily later in the text. Without
+   this a sender could forge an edge by quoting a wrapper naming someone else
+   in its own message body.
+
+   The lead-in is matched against a list of exact strings (`PEER_MSG_LEAD_INS`)
+   rather than inferred, because no structural test separates the harness's
+   `Another Claude session sent a message:` from a person's `here is a log I
+   pasted:` — both are a short line with no wrapper in it, and the second is
+   exactly the accident this guard rejects. That couples the ledger to a string
+   the harness owns: if the wording changes, rows stop being written and the
+   table goes quiet rather than wrong. Until 1.10.2 the rule was offset 0 with
+   no allowance, which no genuine delivery has ever satisfied; the only rows
+   written were from senders that wrote the frame themselves and put the
+   wrapper first.
 2. The sender must already be registered. An unknown address writes no row at
    all, so junk never enters the table rather than being filtered by whoever
    reads it.
 
 Unsampled: the interesting case is a burst and thinning would hide exactly
 that. It stays small by being rare. Cap it before thinning it.
+
+Only a delivery that arrives as a prompt is recorded. A message that reaches a
+session mid-turn is attached to the turn already running, fires no
+`UserPromptSubmit`, and writes nothing — so traffic between two busy sessions
+is absent from the table. These rows are a sample of the conversation, not a
+census of it, and a consumer that draws them should not imply otherwise.
 
 Recording that a message arrived is not transport. The ledger still never
 carries, queues or routes anything — the message has already been delivered by

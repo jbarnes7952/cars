@@ -1050,13 +1050,48 @@ def _roster_state_dir():
     return os.path.join(os.path.dirname(DB_PATH), "roster-state")
 
 
-# The wrapper the harness puts around an inbound cross-session message. Matched
-# only at the very start of the prompt: the genuine wrapper is prepended by the
+# The wrapper the harness puts around an inbound cross-session message.
+# Anchored at the start of the prompt: the genuine wrapper is prepended by the
 # harness, so anything quoting one is necessarily later in the text. Without
 # that anchor a sender could forge an edge by quoting a wrapper in its own
 # message body, and a pasted transcript could invent one by accident.
 PEER_MSG_TAG = "<cross-session-message"
+
+# The harness does not hand the wrapper over bare. It delivers an inbound
+# message as a prompt of its own and writes one fixed line above the wrapper
+# first, so a genuine delivery arrives at offset 39, not 0. Requiring offset 0
+# therefore rejected every real message and recorded only senders that wrote
+# the frame themselves (seat send, which puts the wrapper first) -- the table
+# looked quiet because the guard was, not because the fleet was.
+#
+# Recognising the sentence rather than inferring it is deliberate. "A short
+# line with no wrapper in it" would also describe "here is a log I pasted:",
+# which is exactly the accident the anchor exists to reject, so there is no
+# structural test that separates the two: the lead-in has to be named. That
+# couples this file to a string the harness owns. IF PEER MESSAGES GO QUIET,
+# CHECK THIS LIST FIRST -- compare it against the `prompt` a UserPromptSubmit
+# hook actually receives for a delivery, and add the new wording here.
+PEER_MSG_LEAD_INS = (
+    "Another Claude session sent a message:\n",
+)
 _PEER_FROM_RE = re.compile(r'\sfrom="([^"]*)"')
+
+
+def peer_msg_payload(prompt):
+    """Return the prompt from the wrapper onward, or None if it is not one.
+
+    At most one lead-in is stripped, and only from the front, so the wrapper
+    this returns is always the first in the text. That is what keeps the
+    anti-forgery guard: the harness puts the genuine wrapper before any body a
+    sender controls, so a quoted one is necessarily later and never the one
+    read here.
+    """
+    text = (prompt or "").lstrip()
+    for lead in PEER_MSG_LEAD_INS:
+        if text.startswith(lead):
+            text = text[len(lead):].lstrip()
+            break
+    return text if text.startswith(PEER_MSG_TAG) else None
 
 
 def hook_peer_message():
@@ -1069,16 +1104,17 @@ def hook_peer_message():
     heartbeat and deregister are self-reported; evicted is the ledger's own
     act. This row is the RECEIVER's claim about a third party, inferred from
     text, and nothing verifies it afterwards. Two guards keep it as honest as
-    an inference can be: the wrapper must sit at offset 0, and the sender must
-    already be in the directory or no row is written at all -- junk never
-    enters the table rather than being filtered by whoever reads it.
+    an inference can be: the wrapper must be the first thing in the prompt
+    barring a lead-in the harness itself wrote, and the sender must already be
+    in the directory or no row is written at all -- junk never enters the
+    table rather than being filtered by whoever reads it.
 
     Unsampled by design: the interesting case is a burst, and thinning would
     hide exactly that. It stays small by being rare.
     """
     hook = read_hook_input()
-    prompt = (hook.get("prompt") or "").lstrip()
-    if not prompt.startswith(PEER_MSG_TAG):
+    prompt = peer_msg_payload(hook.get("prompt"))
+    if prompt is None:
         return
     tag = prompt[:prompt.find(">") + 1] if ">" in prompt else ""
     match = _PEER_FROM_RE.search(tag)

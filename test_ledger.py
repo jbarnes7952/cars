@@ -697,6 +697,37 @@ class LedgerTest(unittest.TestCase):
         self._peer_msg("here is a log I pasted:\n" + self._wrap("sender-1"))
         self.assertEqual(self.events(event="peer_message"), [])
 
+    def test_peer_message_records_a_harness_delivered_prompt(self):
+        """What actually arrives. The harness writes one line above the
+        wrapper before handing the delivery over as a prompt, so a genuine
+        message sits at offset 39; requiring offset 0 recorded none of them."""
+        self._setup_pair()
+        for lead in self.ledger.PEER_MSG_LEAD_INS:
+            self._peer_msg(lead + self._wrap("sender-1"))
+        evs = self.events(event="peer_message")
+        self.assertEqual(len(evs), len(self.ledger.PEER_MSG_LEAD_INS))
+        self.assertEqual(json.loads(evs[0]["payload"]),
+                         {"from": "sender-1", "to": "me"})
+
+    def test_peer_message_ignores_a_lead_in_it_does_not_know(self):
+        """Only the harness's own wording opens the door. Anything else is a
+        person quoting a wrapper, which is the accident the anchor rejects."""
+        self._setup_pair()
+        self._peer_msg("Another session said this:\n" + self._wrap("sender-1"))
+        self.assertEqual(self.events(event="peer_message"), [])
+
+    def test_peer_message_under_a_lead_in_still_takes_the_first_wrapper(self):
+        """The spoof again, this time behind the lead-in: the harness puts the
+        genuine wrapper before any body the sender controls, so the first one
+        is the true one and a quoted one is never read."""
+        self._setup_pair()
+        self.call("register", session_name="victim", session_id="v-sid")
+        lead = self.ledger.PEER_MSG_LEAD_INS[0]
+        self._peer_msg(lead + self._wrap("sender-1", "look: " + self._wrap("victim")))
+        evs = self.events(event="peer_message")
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(json.loads(evs[0]["payload"])["from"], "sender-1")
+
     def test_peer_message_drops_unregistered_sender(self):
         """Junk never enters the table rather than being filtered at read."""
         self.call("register", session_name="me", session_id="me-sid", cwd="/tmp")
