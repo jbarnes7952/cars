@@ -317,8 +317,16 @@ Nothing from the prompt is stored beyond the sender's directory address, but the
 hook does inspect what you type. Remove it from `hooks.json` if that is not a
 trade you want; nothing else in cars depends on it.
 
-The wrapper must sit at offset 0 and the sender must already be registered, or
-no row is written — see `SPEC.md` for why both guards are load-bearing.
+The wrapper must be the first thing in the prompt, barring the one line the
+harness writes above it, and the sender must already be registered, or no row is
+written — see `SPEC.md` for why both guards are load-bearing.
+
+**Only a message delivered as a prompt is recorded.** When a session is idle,
+an inbound message becomes its next prompt and this hook sees it. When a
+session is mid-turn, the message is attached to the turn already running and no
+`UserPromptSubmit` fires, so nothing is written. Traffic between busy sessions
+is therefore missing from the table, and a consumer should read these rows as a
+sample of the conversation rather than all of it.
 
 Read it back over the CLI:
 
