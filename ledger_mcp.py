@@ -25,6 +25,9 @@ Usage:
                                    the 20 least recent. Pass the last ts seen
                                    as --since to drain in order; `truncated`
                                    in the result means more rows matched.
+                                   --since accepts any ISO 8601 instant and is
+                                   normalised, so precision and offset do not
+                                   change which rows match.
     ledger_mcp.py list [--stale] [--json]
                                    pretty-print (or dump) registered agents
     ledger_mcp.py register         directory ops from the command line: the
@@ -203,6 +206,25 @@ def parse_iso(ts):
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
+
+
+def to_stored_iso(ts):
+    """Re-render any ISO 8601 instant into the exact format `ts` columns hold.
+
+    Stored timestamps carry milliseconds and a literal Z, and `--since` is
+    compared as a STRING. So a caller-supplied bound at a different precision
+    compares wrongly rather than approximately: 'Z' sorts above '.', which
+    makes second-precision "17:25:04Z" later than "17:25:04.304Z" and silently
+    drops rows inside that second. Normalising removes the trap instead of
+    documenting it. Returns None if the input is not a parseable instant.
+    """
+    dt = parse_iso(ts)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds").replace("+00:00", "Z")
 
 
 def age_seconds(ts):
@@ -1237,8 +1259,11 @@ def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
     sql = "SELECT ts, payload FROM events WHERE event = ?"
     args = [event]
     if since:
+        bound = to_stored_iso(since)
+        if bound is None:
+            raise ToolError(f"--since is not a valid ISO 8601 instant: {since}")
         sql += " AND ts > ?"
-        args.append(since)
+        args.append(bound)
     # One more than asked, to report truncation exactly rather than guessing
     # from a full page.
     sql += " ORDER BY ts LIMIT ?"
