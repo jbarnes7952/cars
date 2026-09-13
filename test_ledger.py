@@ -118,6 +118,103 @@ class LedgerTest(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def _live_addr(self, name="live.sock"):
+        """A real socket named for THIS process, so pid and socket both exist."""
+        import socket as socketlib, os as _os
+        path = _os.path.join(self.tmp.name, f"{_os.getpid()}.sock")
+        sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+        sock.bind(path)
+        self.addCleanup(sock.close)
+        return "uds:" + path
+
+    def test_live_session_is_not_evicted_however_long_it_idles(self):
+        """Silence is not death. A standing agent waiting on a decision fires
+        no hooks, so it heartbeats never — it must not be deleted for that."""
+        addr = self._live_addr()
+        self.call("register", session_name=addr, session_id="idle-1")
+        self._age(addr, 48 * 3600)          # well past EVICT_SECONDS
+        self.call("list_agents_detailed", include_stale=True)   # drives eviction
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertIn(addr, names, "a live session must survive any idle time")
+        self.assertEqual(self.events(event="evicted", session_name=addr), [])
+
+    def test_dead_session_is_still_evicted_after_the_window(self):
+        """The rule still works when there is no evidence of life."""
+        self.call("register", session_name="ghost-1", session_id="g1")
+        self._age("ghost-1", 48 * 3600)
+        self.call("list_agents_detailed", include_stale=True)
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertNotIn("ghost-1", names)
+        self.assertTrue(self.events(event="evicted", session_name="ghost-1"))
+
+    def test_live_but_stale_row_stays_in_the_roster(self):
+        """Idle-by-design sessions were vanishing from find_agents while
+        running and reachable."""
+        addr = self._live_addr()
+        self.call("register", session_name=addr, session_id="idle-2",
+                  role="standing maintainer", query_me_when="ask me anything")
+        self._age(addr, 3600)               # stale, but alive
+        rec = [a for a in self.call("list_agents_detailed",
+                                    include_stale=True)["agents"]
+               if a["session_name"] == addr][0]
+        self.assertTrue(rec["stale"], "should still be reported as stale")
+        self.assertTrue(rec["live"], "and simultaneously as live")
+        found = self.call("find_agents", query="standing maintainer")
+        self.assertEqual([a["session_name"] for a in found["agents"]], [addr],
+                         "a live session must remain reachable when stale")
+
+    def test_stale_without_evidence_is_still_hidden(self):
+        self.call("register", session_name="quiet-1", role="unreachable thing")
+        self._age("quiet-1", 3600)
+        found = self.call("find_agents", query="unreachable thing")
+        self.assertEqual(found["agents"], [])
+
+    def test_register_supersedes_a_row_matched_by_address(self):
+        """The orphan bug: supersede keyed only on session_id, so a row that
+        carried an address but no session_id survived as a duplicate that
+        heartbeats never reached, then aged out on its own."""
+        addr = self._live_addr()
+        self.call("register", session_name="ark-x", address=addr)   # no sid
+        self.call("register", session_name=addr, session_id="sx")
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertNotIn("ark-x", names, "the address should collapse the orphan")
+
+    def test_register_with_neither_key_is_not_reconciled(self):
+        """Documented limit: nothing links a keyless row to a session, and
+        guessing from cwd would delete live registrations."""
+        self.call("register", session_name="keyless", cwd="/repos/ark")
+        self.call("register", session_name="other", session_id="o1",
+                  cwd="/repos/ark")
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertIn("keyless", names)
+        self.assertIn("other", names)
+
+    def test_cwd_supersede_only_when_it_names_exactly_one_row(self):
+        """cwd is a weak key; it must not delete when two sessions share a
+        directory."""
+        self.call("register", session_name="a-1", cwd="/shared")
+        self.call("register", session_name="a-2", cwd="/shared")
+        self.call("register", session_name="a-3", cwd="/shared")
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertEqual({"a-1", "a-2", "a-3"} & names, {"a-1", "a-2", "a-3"})
+
+    def test_register_by_name_supersedes_the_address_row(self):
+        """And the other direction: adopting a name must not leave the
+        address row behind."""
+        addr = self._live_addr()
+        self.call("register", session_name=addr, session_id="sy")
+        self.call("register", session_name="named-y", session_id="sy",
+                  address=addr)
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertIn("named-y", names)
+        self.assertNotIn(addr, names)
+
     def test_stale_flag_and_filtering(self):
         self.call("register", session_name="old")
         self.call("register", session_name="fresh")

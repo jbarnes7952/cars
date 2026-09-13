@@ -44,7 +44,7 @@ SQLite database at `~/.claude-ledger/ledger.db`. WAL mode. Two tables:
 | machine | TEXT | hostname |
 | registered_at | TEXT | ISO 8601 UTC |
 | last_seen | TEXT | ISO 8601 UTC, bumped on every write from that session |
-| address | TEXT | `uds:` transport address, even when the session registered under a chosen name. Backfilled by the heartbeat hook, which runs inside the session it describes; `register` stores only what a caller states, since a spawner registering a child would derive its own address. |
+| address | TEXT | `uds:` transport address, even when the session registered under a chosen name. Backfilled by the heartbeat hook, which runs inside the session it describes; `register` stores only what a caller states, since a spawner registering a child would derive its own address. Also the key that lets `register` supersede a duplicate row. |
 
 ### `events` (append-only, never updated or deleted)
 
@@ -163,8 +163,13 @@ session's context for a niche a consumer reaches over the CLI anyway, and
 ## Staleness
 
 - `last_seen` older than **10 minutes** ⇒ entry is *stale*. Query tools still return stale entries but flag them (`"stale": true`).
-- `last_seen` older than **24 hours** ⇒ evict: delete from `agents`, write an `evicted` event. Eviction runs lazily on any tool call (no background daemon).
+- A row is **live** (`"live": true`) when its transport socket exists on this machine *and* the process named by that socket exists. The address comes from `session_name` when the session registered under it, or from `address` otherwise.
+- `last_seen` older than **24 hours** ⇒ evict — **unless the row is live**. Eviction runs lazily on any tool call (no background daemon).
 - Any tool call from a session (identified by `session_name` argument) bumps its `last_seen`.
+
+Silence is not death. A session idle by design fires no hooks and therefore sends no heartbeats, so deleting it for having nothing to say removed standing agents from the directory while they were still running. A live row is never evicted however long it idles, and `find_agents`, `list_agents_detailed` and the roster list it even when stale — `stale` and `last_seen` are there for a consumer to render it as idle. A stale row with no live evidence is still hidden, and a missing socket still evicts immediately.
+
+The converse asymmetry is deliberate: a missing socket may evict a row, but a backfilled `address` may only ever *protect* one. The address is inferred rather than declared, and a wrong inference must not be able to delete a live session.
 
 ## MCP tools
 
