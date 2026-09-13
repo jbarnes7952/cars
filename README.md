@@ -328,12 +328,16 @@ alone recorded nothing for sessions registered under a chosen name. The
 `address` column closes that, and a resolved sender is reported as `from_name`
 so a consumer needs no join.
 
-**Only a message delivered as a prompt is recorded.** When a session is idle,
-an inbound message becomes its next prompt and this hook sees it. When a
-session is mid-turn, the message is attached to the turn already running and no
-`UserPromptSubmit` fires, so nothing is written. Traffic between busy sessions
-is therefore missing from the table, and a consumer should read these rows as a
-sample of the conversation rather than all of it.
+**A mid-turn delivery is deferred, not dropped.** When a session is idle, an
+inbound message becomes its next prompt and this hook sees it immediately. When
+a session is busy, the message is queued and submitted as its own prompt once
+the turn ends — so it is still recorded, just later. Traffic between busy
+sessions is present in the table.
+
+What is lost is arrival time, not the row: `ts` is when the delivery was
+recorded, which for a deferred message is the next prompt boundary. Treat `ts`
+as "when this was seen", not "when this arrived". A queued batch flushing at
+once shows up as several rows milliseconds apart.
 
 Read it back over the CLI:
 

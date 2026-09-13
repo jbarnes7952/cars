@@ -111,11 +111,17 @@ address as observed. `address` makes either form resolvable.
 Unsampled: the interesting case is a burst and thinning would hide exactly
 that. It stays small by being rare. Cap it before thinning it.
 
-Only a delivery that arrives as a prompt is recorded. A message that reaches a
-session mid-turn is attached to the turn already running, fires no
-`UserPromptSubmit`, and writes nothing — so traffic between two busy sessions
-is absent from the table. These rows are a sample of the conversation, not a
-census of it, and a consumer that draws them should not imply otherwise.
+A mid-turn delivery is deferred, not dropped. A message arriving while a
+session is working is queued and submitted as its own prompt once the turn
+ends, so `UserPromptSubmit` does fire and the row is written — just later.
+Traffic between two busy sessions is present rather than absent.
+
+What the row loses is arrival time, not existence: `ts` records when the
+delivery was *recorded*, which for a deferred one is the next prompt boundary
+rather than the moment it arrived. So the table under-reports latency and a
+consumer should not read `ts` as an arrival timestamp. A queued batch
+flushing at once is visible as a cluster of rows milliseconds apart, each
+still its own prompt.
 
 Recording that a message arrived is not transport. The ledger still never
 carries, queues or routes anything — the message has already been delivered by
