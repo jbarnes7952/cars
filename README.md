@@ -259,10 +259,14 @@ Priority order:
 
 ## Staleness & eviction
 
-- `last_seen` > 10 min ⇒ entry flagged `"stale": true` (still returned when
-  `include_stale: true`).
-- `last_seen` > 24 h ⇒ evicted (row deleted, `evicted` event written).
-  Eviction runs lazily on every tool call — no background daemon.
+- `last_seen` > 10 min ⇒ entry flagged `"stale": true`.
+- A row is `"live": true` when its transport socket exists **and** the process
+  named by that socket does. A live row is listed even when stale — an agent
+  idle by design is still somewhere you can send a message.
+- `last_seen` > 24 h ⇒ evicted (row deleted, `evicted` event written) — unless
+  it is live. Eviction runs lazily on every tool call — no background daemon.
+- A missing socket still evicts at once. A backfilled `address` can only ever
+  protect a row from eviction, never cause one.
 - Any tool call carrying a `session_name` bumps that session's `last_seen`.
 
 Departure cleanup, in layers:

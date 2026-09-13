@@ -265,23 +265,79 @@ def write_event(conn, session_name, session_id, event, payload):
     )
 
 
+def row_address(row):
+    """The transport address for a row, however it was registered.
+
+    A session registered under its address carries it as `session_name`; one
+    registered under a chosen name carries it in `address`, backfilled by the
+    heartbeat hook.
+    """
+    name = row["session_name"] or ""
+    if name.startswith("uds:"):
+        return name
+    try:
+        addr = row["address"] or ""
+    except (IndexError, KeyError):
+        addr = ""
+    return addr if addr.startswith("uds:") else ""
+
+
+def row_is_live(row, host=None):
+    """True if this row's session is demonstrably still running.
+
+    cars already trusts a MISSING socket as proof a session is gone. This is
+    the converse, and it is what lets a session be idle for days without being
+    deleted or hidden: a socket that exists, whose owning process still
+    exists, is better evidence of life than a heartbeat, which only says the
+    session was alive when it last did something.
+
+    The socket alone is not enough — a kill -9 leaves the file behind — so the
+    pid embedded in the socket name is checked too. Only same-machine rows can
+    be judged this way; anything else returns False, meaning "no evidence",
+    not "dead".
+    """
+    if row["machine"] != (host or socket.gethostname()):
+        return False
+    addr = row_address(row)
+    if not addr:
+        return False
+    path = addr[4:]
+    if not os.path.exists(path):
+        return False
+    base = os.path.basename(path)
+    pid = base[:-5] if base.endswith(".sock") else ""
+    if not pid.isdigit():
+        return False
+    return os.path.exists(f"/proc/{pid}")
+
+
 def evict_stale(conn):
     """Lazy eviction, run at the start of every tool call.
 
-    Evicts rows idle past EVICT_SECONDS, and — for same-machine agents
-    registered under a transport address — rows whose socket no longer
-    exists (the session is dead: crash, kill -9, or exit without the
-    SessionEnd hook firing)."""
+    Evicts rows whose session is believed gone: a same-machine transport
+    socket that no longer exists (crash, kill -9, or exit without the
+    SessionEnd hook), or silence past EVICT_SECONDS with no live session to
+    contradict it.
+
+    Silence alone is not death. A session idle by design fires no hooks and so
+    sends no heartbeats, and deleting it because it had nothing to say made
+    standing agents vanish from the directory while still running. A row with
+    live evidence (see row_is_live) is never evicted however long it idles."""
     host = socket.gethostname()
     rows = conn.execute("SELECT * FROM agents").fetchall()
     for row in rows:
         payload = None
-        if age_seconds(row["last_seen"]) > EVICT_SECONDS:
-            payload = {"last_seen": row["last_seen"]}
-        elif (row["machine"] == host
+        live = row_is_live(row, host)
+        # Socket-gone eviction stays keyed on rows NAMED by their address, as
+        # before. A backfilled `address` may only ever protect a row from
+        # eviction, never cause one: it is inferred rather than declared, and
+        # a wrong inference should not be able to delete a live session.
+        if (row["machine"] == host
                 and (row["session_name"] or "").startswith("uds:")
                 and not os.path.exists(row["session_name"][4:])):
             payload = {"reason": "transport-socket-gone"}
+        elif not live and age_seconds(row["last_seen"]) > EVICT_SECONDS:
+            payload = {"last_seen": row["last_seen"]}
         if payload is not None:
             conn.execute(
                 "DELETE FROM agents WHERE session_name = ?", (row["session_name"],)
@@ -299,6 +355,10 @@ def row_to_record(row):
     except (ValueError, TypeError):
         rec["capabilities"] = []
     rec["stale"] = age_seconds(row["last_seen"]) > STALE_SECONDS
+    # Whether the session is demonstrably still running. `stale` says "not
+    # active recently"; `live` says "still there". A standing agent waiting on
+    # a decision is both.
+    rec["live"] = row_is_live(row)
     return rec
 
 
@@ -361,12 +421,36 @@ def op_register(conn, args):
     write_event(conn, name, fields["session_id"], "register", payload)
     # A session upgrading from a transport address to a real name (or
     # re-registering after a restart) supersedes its other rows.
+    # Collapse any other row describing this same session. session_id is the
+    # strongest key, but a row registered without one could never be matched
+    # by it and was left behind as an orphan that heartbeats never reached --
+    # it then aged out silently while the session was fine. So match on the
+    # transport address too, which identifies a session just as exactly.
     sid = fields["session_id"]
+    addr = fields["address"] or (name if name.startswith("uds:") else "")
+    clauses, args = [], []
     if sid:
+        clauses.append("session_id = ?")
+        args.append(sid)
+    if addr:
+        clauses.append("session_name = ?")
+        args.append(addr)
+        clauses.append("address = ?")
+        args.append(addr)
+    others = []
+    if clauses:
         others = conn.execute(
             "SELECT session_name FROM agents"
-            " WHERE session_id = ? AND session_name != ?", (sid, name),
+            f" WHERE ({' OR '.join(clauses)}) AND session_name != ?",
+            tuple(args) + (name,),
         ).fetchall()
+    # Deliberately no cwd fallback. find_own_row uses a unique cwd to MATCH a
+    # row, which is read-only and best-effort; using it to DELETE one is not
+    # the same risk. Two sessions in one directory would collapse each other,
+    # and each new registration would eat the previous -- destroying a live
+    # registration to tidy a duplicate. A registration carrying neither a
+    # session_id nor an address is therefore unreconcilable by design: pass
+    # one of them and the duplicate collapses on the next register.
         for row in others:
             conn.execute("DELETE FROM agents WHERE session_name = ?",
                          (row["session_name"],))
@@ -486,7 +570,7 @@ def op_find_agents(conn, args):
     ).fetchall()
     records = [row_to_record(r) for r in rows]
     if not include_stale:
-        records = [r for r in records if not r["stale"]]
+        records = [r for r in records if is_reachable(r)]
     return {"agents": records, "count": len(records)}
 
 
@@ -495,7 +579,7 @@ def op_list_agents_detailed(conn, args):
     rows = conn.execute("SELECT * FROM agents ORDER BY last_seen DESC").fetchall()
     records = [row_to_record(r) for r in rows]
     if not include_stale:
-        records = [r for r in records if not r["stale"]]
+        records = [r for r in records if is_reachable(r)]
     return {"agents": records, "count": len(records)}
 
 
@@ -677,8 +761,20 @@ def _matches_peer(rec, tool_name):
         or tool_name.startswith((f"ask_{base40}__", base80 + "__"))
 
 
+def is_reachable(rec):
+    """Whether a record should be offered as somewhere to send a message.
+
+    Stale means "not active recently", which for a standing agent waiting on a
+    decision is normal rather than disqualifying. Hiding those made idle-by-
+    design sessions look absent to the fleet while they were running and
+    reachable, so a row with live evidence is listed however long it has been
+    quiet. Consumers have `stale` and `last_seen` to show it as idle.
+    """
+    return (not rec["stale"]) or rec.get("live", False)
+
+
 def fresh_agents(limit=None):
-    """Fresh (non-stale) records, newest first. Empty list on any DB failure."""
+    """Reachable records, newest first. Empty list on any DB failure."""
     try:
         conn = connect()
     except Exception:
@@ -687,7 +783,7 @@ def fresh_agents(limit=None):
         rows = conn.execute("SELECT * FROM agents ORDER BY last_seen DESC").fetchall()
     finally:
         conn.close()
-    recs = [r for r in (row_to_record(x) for x in rows) if not r["stale"]]
+    recs = [r for r in (row_to_record(x) for x in rows) if is_reachable(r)]
     return recs[:limit] if limit else recs
 
 
