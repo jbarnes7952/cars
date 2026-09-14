@@ -215,6 +215,36 @@ class LedgerTest(unittest.TestCase):
         self.assertIn("named-y", names)
         self.assertNotIn(addr, names)
 
+    def _seed_findable(self):
+        self.call("register", session_name="tmuxer", role="cccm-tmux maintainer",
+                  project="cccm-tmux", status="idle",
+                  query_me_when="ask about the tmux status line and the picker")
+
+    def test_find_agents_matches_words_across_fields(self):
+        """The reported failure: every word present, none contiguous, and the
+        old whole-string LIKE returned an empty list rather than an error."""
+        self._seed_findable()
+        r = self.call("find_agents",
+                      query="cccm-tmux maintainer picker idle")
+        self.assertEqual([a["session_name"] for a in r["agents"]], ["tmuxer"])
+
+    def test_find_agents_still_matches_what_it_used_to(self):
+        """Tokenising must be a superset: a contiguous phrase has all its
+        words in that field, so it cannot stop matching."""
+        self._seed_findable()
+        self.assertEqual(self.call("find_agents", query="tmux status line")["count"], 1)
+        self.assertEqual(self.call("find_agents", query="cccm-tmux")["count"], 1)
+
+    def test_find_agents_requires_every_word(self):
+        """AND across words, so extra words narrow rather than widen."""
+        self._seed_findable()
+        self.assertEqual(
+            self.call("find_agents", query="tmux picker kubernetes")["count"], 0)
+
+    def test_find_agents_handles_whitespace_only_query(self):
+        self._seed_findable()
+        self.assertEqual(self.call("find_agents", query="   ")["count"], 0)
+
     def test_stale_flag_and_filtering(self):
         self.call("register", session_name="old")
         self.call("register", session_name="fresh")

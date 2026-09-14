@@ -577,11 +577,24 @@ def op_heartbeat(conn, args):
 def op_find_agents(conn, args):
     query = args["query"]
     include_stale = bool(args.get("include_stale", False))
-    like = f"%{query}%"
-    where = " OR ".join(f"{f} LIKE ? COLLATE NOCASE" for f in SEARCH_FIELDS)
+    # Every word must appear somewhere in the record; each may appear in a
+    # different field. Matching the whole query as one substring meant a
+    # natural-language ask -- the shape the tool description invites -- found
+    # nothing unless the words happened to be contiguous in one field, and
+    # returned an empty list rather than an error, so a caller read "no such
+    # peer" instead of "bad query". Still substring matching per token: no
+    # embeddings, no FTS, per SPEC.
+    #
+    # Strictly a superset of the old behaviour: a query that matched
+    # contiguously has all its words in that field, so it still matches.
+    # Extra words make a query narrower, never wider.
+    tokens = query.split() or [query]
+    per_token = "(" + " OR ".join(
+        f"{f} LIKE ? COLLATE NOCASE" for f in SEARCH_FIELDS) + ")"
+    where = " AND ".join(per_token for _ in tokens)
+    params = tuple(f"%{t}%" for t in tokens for _ in SEARCH_FIELDS)
     rows = conn.execute(
-        f"SELECT * FROM agents WHERE {where} ORDER BY last_seen DESC",
-        tuple(like for _ in SEARCH_FIELDS),
+        f"SELECT * FROM agents WHERE {where} ORDER BY last_seen DESC", params,
     ).fetchall()
     records = [row_to_record(r) for r in rows]
     if not include_stale:
@@ -659,7 +672,7 @@ TOOLS = [
     },
     {
         "name": "find_agents",
-        "description": "Find peer sessions to message. Free-text match on role/capabilities/query_me_when/status/project; returns each match's session_name for SendMessage.",
+        "description": "Find peer sessions to message. Every word must appear somewhere in role/capabilities/query_me_when/status/project; returns each match's session_name for SendMessage.",
         "inputSchema": {
             "type": "object",
             "properties": {"query": STR, "include_stale": BOOL_FALSE},
