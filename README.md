@@ -273,6 +273,10 @@ the address, so one session could appear under two names.
 - A missing socket still evicts at once. A backfilled `address` can only ever
   protect a row from eviction, never cause one.
 - Any tool call carrying a `session_name` bumps that session's `last_seen`.
+- A process whose source file has changed on disk since it started does not
+  evict at all. Long-lived `serve` processes keep their code for days, and
+  eviction runs in whichever process makes a tool call, so one straggler could
+  otherwise undo a release for the whole fleet.
 
 Departure cleanup, in layers:
 
