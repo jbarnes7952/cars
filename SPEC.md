@@ -194,7 +194,7 @@ Naming, when `session_name` is omitted: `CLAUDE_LEDGER_NAME` → the derived tra
 
 ### `find_agents`
 Args: `query` (free text, required), `include_stale` (bool, default false).
-Match against `role`, `capabilities`, `query_me_when`, `status`, `project` — case-insensitive substring/LIKE matching across those fields is sufficient; do **not** add embeddings or FTS in v1. Returns matching records ordered by freshness, each including `session_name` (the address to pass to `SendMessage`), `stale` flag, and all descriptive fields.
+Match against `role`, `capabilities`, `query_me_when`, `status`, `project`. The query is split on whitespace and **every word must appear in some field** (AND across words, OR across fields), case-insensitive substring per word; do **not** add embeddings or FTS in v1. Matching the whole query as one substring made a multi-word ask return an empty list unless the words were contiguous in a single field — indistinguishable, to the caller, from no such peer existing. Note the consequence: a question with filler words ("who handles the tmux status line") still finds nothing, because `who` and `handles` appear nowhere. Pass keywords, not a sentence. Returns matching records ordered by freshness, each including `session_name` (the address to pass to `SendMessage`), `stale` flag, and all descriptive fields.
 
 ### `list_agents_detailed`
 Args: `include_stale` (bool, default false). Returns all registered agents with full records.

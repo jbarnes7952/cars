@@ -367,7 +367,7 @@ Only `peer_message` is readable this way — `register` and `update` payloads
 carry free-text status, so the verb takes an allowlist rather than any event
 name. There is no MCP tool for it: that would spend every session's context on
 a niche its consumer reaches over the CLI anyway.
-| `find_agents` | free-text match across descriptive fields → returns `session_name` addresses |
+| `find_agents` | every word must appear in some descriptive field → returns `session_name` addresses |
 | `list_agents_detailed` | all records |
 | `deregister` | delete row (idempotent) |
 
