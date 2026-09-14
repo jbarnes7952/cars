@@ -414,6 +414,29 @@ class LedgerTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0)
 
+    def test_nameless_register_prefers_the_session_name_env(self):
+        """Both registration paths must agree. Jumping to the address here
+        keyed the same session two ways depending on which path it used."""
+        os.environ["CLAUDE_LEDGER_NAME"] = "cccm-tmux"
+        self.addCleanup(os.environ.pop, "CLAUDE_LEDGER_NAME", None)
+        rec = self.call("register", cwd="/repos/cccm-tmux")
+        self.assertEqual(rec["session_name"], "cccm-tmux")
+        self.assertEqual(rec["name_source"], "env")
+
+    def test_explicit_name_still_wins_over_the_env(self):
+        """A spawner registering a child passes the child's name, and must
+        not have its own CLAUDE_LEDGER_NAME applied to it."""
+        os.environ["CLAUDE_LEDGER_NAME"] = "the-parent"
+        self.addCleanup(os.environ.pop, "CLAUDE_LEDGER_NAME", None)
+        rec = self.call("register", session_name="the-child", session_id="c1")
+        self.assertEqual(rec["session_name"], "the-child")
+        self.assertEqual(rec["name_source"], "explicit")
+
+    def test_nameless_register_falls_back_to_address_without_the_env(self):
+        os.environ.pop("CLAUDE_LEDGER_NAME", None)
+        rec = self.call("register", cwd="/repos/thing")
+        self.assertEqual(rec["name_source"], "uds")
+
     def test_self_address_and_nameless_register(self):
         sockdir = os.path.join(self.tmp.name, "socks")
         os.makedirs(sockdir)
