@@ -190,6 +190,8 @@ Args: `session_name`, optional `via`. Bumps `last_seen` only. (Optional to wire;
 
 The marker starts the record; it does not repair it. A `heartbeat` event written before `via` existed carries no marker whether it was self-reported or proxied, and nothing recovers the distinction afterwards. Read unmarked events from before that point as *self-reported or proxied, unknown* — not as self-reported.
 
+Naming, when `session_name` is omitted: `CLAUDE_LEDGER_NAME` → the derived transport address. This is the same precedence the SessionStart hook uses, so a session is keyed identically whichever path registers it. An explicitly passed `session_name` always wins, so a spawner registering a child is never given the parent's name.
+
 ### `find_agents`
 Args: `query` (free text, required), `include_stale` (bool, default false).
 Match against `role`, `capabilities`, `query_me_when`, `status`, `project` — case-insensitive substring/LIKE matching across those fields is sufficient; do **not** add embeddings or FTS in v1. Returns matching records ordered by freshness, each including `session_name` (the address to pass to `SendMessage`), `stale` flag, and all descriptive fields.

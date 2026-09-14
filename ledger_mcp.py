@@ -379,8 +379,23 @@ def op_register(conn, args):
     name = args.get("session_name") or ""
     source = "explicit"
     if not name:
-        name = self_address() or ""
-        source = "uds"
+        # Same precedence hook_register already uses, so both registration
+        # paths agree on what a session is called. Going straight to the
+        # address here is what split the roster: sessions registering through
+        # the SessionStart hook got their CLAUDE_LEDGER_NAME, sessions
+        # registering through the tool got a uds: address, for the same
+        # session on the same machine.
+        #
+        # Only ever reached when the caller named nobody, so a spawner
+        # registering a child is unaffected: it passes the child's name, and
+        # deriving one here would give it the PARENT's name, exactly as
+        # deriving an address here would give it the parent's address.
+        env_name = os.environ.get("CLAUDE_LEDGER_NAME", "").strip()
+        if env_name:
+            name, source = env_name, "env"
+        else:
+            name = self_address() or ""
+            source = "uds"
     if not name:
         raise ToolError(
             "session_name required (no transport address derivable on this"

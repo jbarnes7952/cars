@@ -257,6 +257,11 @@ Priority order:
    value either). The code still honors it if a future version adds it.
 3. Derived `basename(cwd)-<first 4 of session_id>`, flagged as above.
 
+`register` with no `session_name` follows the same order: `CLAUDE_LEDGER_NAME`
+first, then the transport address. Both registration paths therefore key a
+session the same way — previously the hook used the env var and the tool used
+the address, so one session could appear under two names.
+
 ## Staleness & eviction
 
 - `last_seen` > 10 min ⇒ entry flagged `"stale": true`.
