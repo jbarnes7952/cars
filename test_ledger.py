@@ -139,6 +139,36 @@ class LedgerTest(unittest.TestCase):
         self.assertIn(addr, names, "a live session must survive any idle time")
         self.assertEqual(self.events(event="evicted", session_name=addr), [])
 
+    def test_outdated_process_does_not_evict(self):
+        """A straggler must not apply superseded rules to the whole table.
+        One old process evicting is enough to undo a release for everyone."""
+        self.call("register", session_name="ghost-2", session_id="g2")
+        self._age("ghost-2", 48 * 3600)
+        # simulate the on-disk file having moved on under a running process
+        real = self.ledger._LOADED_SOURCE
+        self.ledger._LOADED_SOURCE = (0.0, 1)
+        self.addCleanup(setattr, self.ledger, "_LOADED_SOURCE", real)
+        self.assertTrue(self.ledger.source_is_outdated())
+        conn = self.ledger.connect()
+        try:
+            self.ledger.evict_stale(conn)
+        finally:
+            conn.close()
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertIn("ghost-2", names, "an outdated process must not delete")
+        self.assertEqual(self.events(event="evicted", session_name="ghost-2"), [])
+
+    def test_current_process_still_evicts(self):
+        """The stand-down must not disable eviction generally."""
+        self.assertFalse(self.ledger.source_is_outdated())
+        self.call("register", session_name="ghost-3", session_id="g3")
+        self._age("ghost-3", 48 * 3600)
+        self.call("list_agents_detailed", include_stale=True)
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertNotIn("ghost-3", names)
+
     def test_dead_session_is_still_evicted_after_the_window(self):
         """The rule still works when there is no evidence of life."""
         self.call("register", session_name="ghost-1", session_id="g1")

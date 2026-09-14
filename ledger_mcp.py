@@ -265,6 +265,43 @@ def write_event(conn, session_name, session_id, event, payload):
     )
 
 
+def _source_stamp():
+    """(mtime, size) of this file, or None if it cannot be read."""
+    try:
+        st = os.stat(os.path.abspath(__file__))
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return None
+
+
+_LOADED_SOURCE = _source_stamp()
+
+
+def source_is_outdated():
+    """True when the file on disk differs from the one this process loaded.
+
+    A long-lived `serve` process holds whatever Python read at startup, for
+    its whole life. On this machine those processes live for days, so a
+    release does not reach them until the session restarts -- and because
+    eviction runs in whichever process happens to make a tool call, ONE
+    straggler can keep applying superseded rules to the whole table however
+    many other sessions have updated.
+
+    Re-exec would be the obvious answer and is the wrong one: `serve` speaks
+    MCP over stdio and is initialized exactly once, so exec'ing would keep the
+    file descriptors but lose that handshake, and the client never sends a
+    second `initialize`. That trades an out-of-date server for a dead one.
+
+    So an out-of-date process keeps serving -- reads and writes stay correct --
+    and only stands down from the destructive operation. Newer processes do
+    the evicting.
+    """
+    if _LOADED_SOURCE is None:
+        return False
+    current = _source_stamp()
+    return current is not None and current != _LOADED_SOURCE
+
+
 def row_address(row):
     """The transport address for a row, however it was registered.
 
@@ -323,6 +360,9 @@ def evict_stale(conn):
     sends no heartbeats, and deleting it because it had nothing to say made
     standing agents vanish from the directory while still running. A row with
     live evidence (see row_is_live) is never evicted however long it idles."""
+    # Never delete on rules this process may no longer be the authority on.
+    if source_is_outdated():
+        return
     host = socket.gethostname()
     rows = conn.execute("SELECT * FROM agents").fetchall()
     for row in rows:
