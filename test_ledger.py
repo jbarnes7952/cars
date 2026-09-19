@@ -127,6 +127,114 @@ class LedgerTest(unittest.TestCase):
         self.addCleanup(sock.close)
         return "uds:" + path
 
+    def test_listings_report_the_answering_server_version(self):
+        """Eleven releases shipped without a way to tell, from outside,
+        which code was actually serving. A long-lived process keeps the
+        source it loaded, so 'released' and 'running' are different facts."""
+        import json as _json, os as _os
+        manifest = _os.path.join(_os.path.dirname(SERVER),
+                                 ".claude-plugin", "plugin.json")
+        expected = _json.load(open(manifest))["version"]
+        for verb in ("list_agents_detailed", "find_agents"):
+            args = {"query": "anything"} if verb == "find_agents" else {}
+            self.assertEqual(self.call(verb, **args)["server_version"], expected,
+                             f"{verb} must say which code answered")
+
+    # ------------------------------------------------------------ presence
+
+    def test_presence_live_for_a_non_pid_socket(self):
+        """The defect this model subsumes: liveness used to be decided by
+        parsing a pid out of <digits>.sock, so a service peer with its own
+        socket name was never live, whatever it was doing."""
+        path = self._bind_socket("orion.sock")
+        self.call("register", session_name="orion-svc", address="uds:" + path)
+        rec = [a for a in self.call("list_agents_detailed",
+                                    include_stale=True)["agents"]
+               if a["session_name"] == "orion-svc"][0]
+        self.assertEqual(rec["presence"], "live")
+        self.assertTrue(rec["live"], "derived boolean must still agree")
+
+    def test_presence_live_from_a_declared_pid_alone(self):
+        """A service peer may have no address at all. orion-assistant
+        publishes a pid and nothing else, and every address-based path
+        returns unknown for it."""
+        self.call("register", session_name="svc-with-pid", pid=os.getpid())
+        rec = [a for a in self.call("list_agents_detailed",
+                                    include_stale=True)["agents"]
+               if a["session_name"] == "svc-with-pid"][0]
+        self.assertEqual(rec["presence"], "live")
+
+    def test_presence_gone_when_a_declared_pid_is_dead(self):
+        dead = 999999
+        self.assertFalse(os.path.exists(f"/proc/{dead}"), "pick an unused pid")
+        self.call("register", session_name="svc-dead-pid", pid=dead)
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertNotIn("svc-dead-pid", names)
+
+    def test_a_dead_pid_does_not_override_a_listening_socket(self):
+        """A spawner may register a child with a pid that is already stale
+        while the child's socket is plainly listening. Conflicting evidence
+        is not grounds for deletion."""
+        sock = self._bind_socket("conflict.sock")
+        self.call("register", session_name="uds:" + sock, pid=999999)
+        rec = [a for a in self.call("list_agents_detailed",
+                                    include_stale=True)["agents"]
+               if a["session_name"] == "uds:" + sock][0]
+        self.assertEqual(rec["presence"], "live")
+
+    def test_presence_gone_when_the_socket_stops_answering(self):
+        path = self._bind_socket("dies.sock")
+        addr = "uds:" + path
+        self.call("register", session_name=addr)
+        self.assertEqual(self.call("list_agents_detailed")["count"], 1)
+        os.unlink(path)
+        self.assertEqual(self.call("list_agents_detailed")["count"], 0)
+
+    def test_presence_unknown_is_not_gone(self):
+        """A row that cannot be checked must not be treated as dead. This is
+        the distinction the old two-boolean model could not express."""
+        self.call("register", session_name="somewhere-else", cwd="/x")
+        con = sqlite3.connect(self.db)
+        con.execute("update agents set machine='another-host' "
+                    "where session_name='somewhere-else'")
+        con.commit(); con.close()
+        rec = [a for a in self.call("list_agents_detailed",
+                                    include_stale=True)["agents"]
+               if a["session_name"] == "somewhere-else"][0]
+        self.assertEqual(rec["presence"], "unknown")
+        self.assertFalse(rec["live"])
+
+    def test_unknown_still_evicted_on_the_activity_fallback(self):
+        """Silence stands in for evidence only where looking is impossible."""
+        self.call("register", session_name="unreachable")
+        self._age("unreachable", 48 * 3600)
+        self.call("list_agents_detailed", include_stale=True)
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertNotIn("unreachable", names)
+
+    def test_inferred_address_may_protect_but_never_delete(self):
+        """A backfilled address is inferred. A wrong inference should cost
+        visibility, not existence."""
+        self.call("register", session_name="named-peer",
+                  address="uds:/nonexistent/whatever.sock")
+        rec = [a for a in self.call("list_agents_detailed",
+                                    include_stale=True)["agents"]
+               if a["session_name"] == "named-peer"][0]
+        self.assertEqual(rec["presence"], "unknown",
+                         "an unreachable INFERRED address is unknown, not gone")
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertIn("named-peer", names, "must not be deleted on inference")
+
+    def test_authoritative_address_that_is_absent_is_gone(self):
+        """Keyed by the address, so its absence IS evidence."""
+        self.call("register", session_name="uds:/nonexistent/gone.sock")
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertNotIn("uds:/nonexistent/gone.sock", names)
+
     def test_live_session_is_not_evicted_however_long_it_idles(self):
         """Silence is not death. A standing agent waiting on a decision fires
         no hooks, so it heartbeats never — it must not be deleted for that."""
@@ -354,12 +462,20 @@ class LedgerTest(unittest.TestCase):
             capture_output=True, text=True, env=os.environ.copy(),
         )
 
-    def _bind_socket(self, name):
-        """A real socket file, so a uds: row survives dead-transport eviction."""
+    def _bind_socket(self, name, listening=True):
+        """A real socket file, so a uds: row survives dead-transport eviction.
+
+        It listens by default, because a live peer's socket does: presence
+        asks the socket whether anything is there rather than trusting the
+        filename, and a bound-but-not-listening socket refuses exactly like a
+        file left behind by a crash. Pass listening=False to simulate that.
+        """
         import socket as socketlib
         path = os.path.join(self.tmp.name, name)
         sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
         sock.bind(path)
+        if listening:
+            sock.listen(1)
         self.addCleanup(sock.close)
         return path
 
@@ -523,10 +639,16 @@ class LedgerTest(unittest.TestCase):
             os.environ.pop("LEDGER_SOCK_DIR", None)
 
     def _fake_uds(self, basename):
-        # a live-looking transport address: the backing path must exist or
-        # dead-transport eviction removes the row on the next tool call
+        # A live-looking transport address. It must be a LISTENING socket, not
+        # merely a file that exists: presence asks the socket whether anything
+        # is there rather than trusting the path, so an empty file reads as a
+        # dead transport exactly like one left behind by a crash.
+        import socket as socketlib
         path = os.path.join(self.tmp.name, basename)
-        open(path, "w").close()
+        sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
+        sock.bind(path)
+        sock.listen(1)
+        self.addCleanup(sock.close)
         return f"uds:{path}", path
 
     def test_named_register_supersedes_transport_row(self):

@@ -113,6 +113,7 @@ CREATE INDEX IF NOT EXISTS idx_events_event_ts
 
 STALE_SECONDS = 10 * 60          # older than this => flagged stale
 EVICT_SECONDS = 24 * 60 * 60     # older than this => evicted (lazily)
+PROBE_TIMEOUT_SECONDS = 0.25       # unix-socket liveness probe: local, cheap
 HEARTBEAT_SAMPLE_SECONDS = 5 * 60  # at most one heartbeat event per session per 5 min
 ROSTER_EVERY_DEFAULT = 5           # inject roster every N prompts (env LEDGER_ROSTER_EVERY)
 ROSTER_TOOLS_EVERY_DEFAULT = 25    # inject every N tool calls (env LEDGER_ROSTER_TOOLS_EVERY)
@@ -319,33 +320,106 @@ def row_address(row):
     return addr if addr.startswith("uds:") else ""
 
 
-def row_is_live(row, host=None):
-    """True if this row's session is demonstrably still running.
+# Presence is one question with three honest answers. It used to be two
+# booleans and an eviction rule that mixed them with activity, which is how
+# one confusion produced three separate defects: idle sessions deleted while
+# running, live peers hidden from the roster, and a liveness check that only
+# recognised Claude Code's socket names.
+#
+# The missing distinction: "has this session acted recently" (last_seen, and
+# the `stale` flag derived from it) is NOT "is this session still there".
+# Activity is evidence of presence, but silence is not evidence of absence,
+# and all three defects came from treating it as if it were. So presence is
+# decided by looking, and last_seen decides only whether a peer has been quiet.
+PRESENCE_LIVE = "live"        # looked, and the process is there
+PRESENCE_GONE = "gone"        # looked, and it is not
+PRESENCE_UNKNOWN = "unknown"  # could not look
 
-    cars already trusts a MISSING socket as proof a session is gone. This is
-    the converse, and it is what lets a session be idle for days without being
-    deleted or hidden: a socket that exists, whose owning process still
-    exists, is better evidence of life than a heartbeat, which only says the
-    session was alive when it last did something.
 
-    The socket alone is not enough — a kill -9 leaves the file behind — so the
-    pid embedded in the socket name is checked too. Only same-machine rows can
-    be judged this way; anything else returns False, meaning "no evidence",
-    not "dead".
+def _probe_socket(path, authoritative):
+    """Ask a unix socket whether anything is listening.
+
+    A bound listener accepts; a file left behind by a crash refuses. This
+    replaces parsing a pid out of the filename, which only ever worked for
+    Claude Code's <pid>.sock convention -- a convention cars does not own,
+    and which any peer with its own socket fails by default.
+    """
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(PROBE_TIMEOUT_SECONDS)
+    try:
+        sock.connect(path)
+        return PRESENCE_LIVE
+    except BlockingIOError:
+        # EAGAIN. settimeout() makes the socket non-blocking, and on a unix
+        # socket connect() returns EAGAIN only when the listener's backlog is
+        # full -- a backlog belongs to a listener, so this is evidence OF
+        # life. Nothing listening gives ECONNREFUSED; no file gives ENOENT.
+        return PRESENCE_LIVE
+    except (ConnectionRefusedError, FileNotFoundError):
+        return PRESENCE_GONE if authoritative else PRESENCE_UNKNOWN
+    except OSError:
+        # Permission denied, timeout, anything else: we did not learn that it
+        # is gone, so we must not say so.
+        return PRESENCE_UNKNOWN
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def presence(row, host=None):
+    """Whether this row's session is still there: live, gone, or unknown.
+
+    `unknown` is a real answer, not a synonym for gone. A row on another
+    machine, or with no transport address, cannot be checked from here, and
+    evicting it on that basis would be deleting it for being unobservable.
+
+    A negative verdict is only ever `gone` when the address is the row's own
+    key. An address backfilled by the heartbeat hook is inferred, and an
+    inferred address may protect a row from eviction but must never delete
+    one: a wrong inference should cost visibility, not existence.
     """
     if row["machine"] != (host or socket.gethostname()):
-        return False
+        return PRESENCE_UNKNOWN
+    authoritative = (row["session_name"] or "").startswith("uds:")
+
+    # Evidence is gathered, not taken in order, and anything POSITIVE wins.
+    # A declared pid needs no address and no filename convention, and for a
+    # service peer it may be the only evidence there is -- orion-assistant
+    # publishes a pid and no address, so every address path below returns
+    # unknown for it, and the column has existed since v1 unread.
+    #
+    # But a dead pid alone must not delete a row that something else says is
+    # alive: a spawner may register a child with a pid that is already stale
+    # while that child's socket is plainly listening. Conflicting evidence is
+    # not grounds for deletion, so a negative pid only decides when nothing
+    # else can be checked.
+    try:
+        pid = row["pid"]
+    except (IndexError, KeyError):
+        pid = None
+    pid_says = None
+    if pid:
+        pid_says = (PRESENCE_LIVE if os.path.exists(f"/proc/{int(pid)}")
+                    else PRESENCE_GONE)
+        if pid_says == PRESENCE_LIVE:
+            return PRESENCE_LIVE
+
     addr = row_address(row)
     if not addr:
-        return False
+        return pid_says or PRESENCE_UNKNOWN
     path = addr[4:]
     if not os.path.exists(path):
-        return False
+        return PRESENCE_GONE if authoritative else PRESENCE_UNKNOWN
     base = os.path.basename(path)
     pid = base[:-5] if base.endswith(".sock") else ""
-    if not pid.isdigit():
-        return False
-    return os.path.exists(f"/proc/{pid}")
+    if pid.isdigit():
+        if os.path.exists(f"/proc/{pid}"):
+            return PRESENCE_LIVE
+        return PRESENCE_GONE if authoritative else PRESENCE_UNKNOWN
+    # Not pid-shaped, so the filename tells us nothing. Ask the socket.
+    return _probe_socket(path, authoritative)
 
 
 def evict_stale(conn):
@@ -367,16 +441,15 @@ def evict_stale(conn):
     rows = conn.execute("SELECT * FROM agents").fetchall()
     for row in rows:
         payload = None
-        live = row_is_live(row, host)
-        # Socket-gone eviction stays keyed on rows NAMED by their address, as
-        # before. A backfilled `address` may only ever protect a row from
-        # eviction, never cause one: it is inferred rather than declared, and
-        # a wrong inference should not be able to delete a live session.
-        if (row["machine"] == host
-                and (row["session_name"] or "").startswith("uds:")
-                and not os.path.exists(row["session_name"][4:])):
+        where = presence(row, host)
+        # One rule, and activity only decides what looking cannot.
+        # `gone` is observed absence and evicts immediately. `unknown` means
+        # unobservable, and only there does silence stand in for evidence --
+        # which is the fallback for rows on another machine, or with no
+        # address to check. `live` is never evicted, however long it idles.
+        if where == PRESENCE_GONE:
             payload = {"reason": "transport-socket-gone"}
-        elif not live and age_seconds(row["last_seen"]) > EVICT_SECONDS:
+        elif where == PRESENCE_UNKNOWN and age_seconds(row["last_seen"]) > EVICT_SECONDS:
             payload = {"last_seen": row["last_seen"]}
         if payload is not None:
             conn.execute(
@@ -395,10 +468,13 @@ def row_to_record(row):
     except (ValueError, TypeError):
         rec["capabilities"] = []
     rec["stale"] = age_seconds(row["last_seen"]) > STALE_SECONDS
-    # Whether the session is demonstrably still running. `stale` says "not
-    # active recently"; `live` says "still there". A standing agent waiting on
-    # a decision is both.
-    rec["live"] = row_is_live(row)
+    # Two different questions, answered separately and named honestly.
+    # `stale` is "has been quiet"; `presence` is "is still there". A standing
+    # agent waiting on a decision is stale and live at the same time, which
+    # was impossible to say before. `live` stays as the derived boolean that
+    # readers and the ark manifest-row contract already consume.
+    rec["presence"] = presence(row)
+    rec["live"] = rec["presence"] == PRESENCE_LIVE
     return rec
 
 
@@ -639,7 +715,12 @@ def op_find_agents(conn, args):
     records = [row_to_record(r) for r in rows]
     if not include_stale:
         records = [r for r in records if is_reachable(r)]
-    return {"agents": records, "count": len(records)}
+    # The version of the code that ANSWERED, not the version on disk. A
+    # serve process holds whatever Python loaded at startup for its whole
+    # life, so "released" and "running" are different facts -- and for
+    # eleven releases there was no way to tell them apart from outside.
+    return {"agents": records, "count": len(records),
+            "server_version": _plugin_version()}
 
 
 def op_list_agents_detailed(conn, args):
@@ -648,7 +729,8 @@ def op_list_agents_detailed(conn, args):
     records = [row_to_record(r) for r in rows]
     if not include_stale:
         records = [r for r in records if is_reachable(r)]
-    return {"agents": records, "count": len(records)}
+    return {"agents": records, "count": len(records),
+            "server_version": _plugin_version()}
 
 
 def op_deregister(conn, args):
@@ -838,7 +920,10 @@ def is_reachable(rec):
     reachable, so a row with live evidence is listed however long it has been
     quiet. Consumers have `stale` and `last_seen` to show it as idle.
     """
-    return (not rec["stale"]) or rec.get("live", False)
+    where = rec.get("presence")
+    if where == PRESENCE_GONE:
+        return False
+    return where == PRESENCE_LIVE or not rec["stale"]
 
 
 def fresh_agents(limit=None):
