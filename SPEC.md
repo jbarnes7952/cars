@@ -163,8 +163,11 @@ session's context for a niche a consumer reaches over the CLI anyway, and
 ## Staleness
 
 - `last_seen` older than **10 minutes** ⇒ entry is *stale*. Query tools still return stale entries but flag them (`"stale": true`).
-- A row is **live** (`"live": true`) when its transport socket exists on this machine *and* the process named by that socket exists. The address comes from `session_name` when the session registered under it, or from `address` otherwise.
-- `last_seen` older than **24 hours** ⇒ evict — **unless the row is live**. Eviction runs lazily on any tool call (no background daemon).
+- A row has a **presence**: `live` (looked, the process is there), `gone` (looked, it is not), or `unknown` (could not look). `"live": true` remains as the derived boolean for readers, meaning `presence == "live"`.
+- Presence gathers evidence and prefers anything positive: a declared `pid` that exists in `/proc`; else the transport socket — `<digits>.sock` resolves via its pid, any other name is settled by connecting to it, since a bound listener accepts and a file left by a crash refuses. A dead `pid` decides only when nothing else can be checked, so conflicting evidence never deletes a row.
+- `unknown` is a real answer, not a synonym for `gone`: a row on another machine, or with no pid and no address, cannot be judged from here.
+- A negative verdict is `gone` only when the address is the row's own key. An `address` backfilled by the heartbeat hook is inferred, and an inferred address may protect a row from eviction but never delete one.
+- Eviction follows presence alone: `gone` evicts at once, `live` never evicts however long it idles, and only `unknown` falls back to `last_seen` older than **24 hours**. Activity decides only what looking cannot. Eviction runs lazily on any tool call (no background daemon).
 - Any tool call from a session (identified by `session_name` argument) bumps its `last_seen`.
 
 Eviction is skipped entirely by a process whose source file on disk no longer matches the one it loaded. A `serve` process holds its code for its whole life, which on this machine is days, and eviction runs in whichever process happens to make a tool call — so one out-of-date process can apply superseded rules to the whole table however many other sessions have updated. An outdated process keeps serving reads and writes and only stands down from the destructive operation; newer processes evict. (Re-exec would be the obvious alternative and is wrong: `serve` speaks MCP over stdio and is initialized once, so exec'ing keeps the descriptors but loses the handshake, trading an out-of-date server for a dead one.)

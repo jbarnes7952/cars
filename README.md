@@ -262,14 +262,46 @@ first, then the transport address. Both registration paths therefore key a
 session the same way — previously the hook used the env var and the tool used
 the address, so one session could appear under two names.
 
+## Which version is actually running
+
+A `serve` process holds whatever Python loaded when it started, for its whole
+life — on this machine that is measured in days. `/reload-plugins` does not
+restart it, and `claude plugin update` does not reach it. So **releasing a
+version and running it are different facts**, and for eleven releases there
+was no way to tell them apart from outside.
+
+Ask the directory what answered you:
+
+```bash
+python3 ledger_mcp.py list --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["server_version"])'
+```
+
+`list_agents_detailed` and `find_agents` both report `server_version`. If it
+is older than the version on disk, that session is running stale code, and
+only restarting the session replaces it. A missing `server_version` means the
+server predates 1.16.0.
+
+Note for directory-marketplace installs (`source: directory` pointing at a
+checkout, which is how a development install works): every session executes
+that working tree, so a dirty tree or a checked-out branch goes live to every
+session on its next server start.
+
 ## Staleness & eviction
 
 - `last_seen` > 10 min ⇒ entry flagged `"stale": true`.
-- A row is `"live": true` when its transport socket exists **and** the process
-  named by that socket does. A live row is listed even when stale — an agent
-  idle by design is still somewhere you can send a message.
-- `last_seen` > 24 h ⇒ evicted (row deleted, `evicted` event written) — unless
-  it is live. Eviction runs lazily on every tool call — no background daemon.
+- Every row has a `presence`: `live`, `gone`, or `unknown`. `"live": true` is
+  kept as the derived boolean, meaning `presence == "live"`. A live row is
+  listed even when stale — an agent idle by design is still somewhere you can
+  send a message.
+- Presence prefers positive evidence: a declared `pid` found in `/proc`, else
+  the transport socket (a `<digits>.sock` name resolves by pid; any other name
+  is settled by connecting to it). A service peer that publishes only a pid is
+  therefore judged correctly, which the old filename-based check could not do.
+- `unknown` means "could not look", not "dead", and only `unknown` rows fall
+  back to the 24-hour activity rule.
+- Eviction follows presence: `gone` evicts at once, `live` never does, and
+  only `unknown` uses the 24-hour `last_seen` fallback. Eviction runs lazily on
+  every tool call — no background daemon.
 - A missing socket still evicts at once. A backfilled `address` can only ever
   protect a row from eviction, never cause one.
 - Any tool call carrying a `session_name` bumps that session's `last_seen`.
