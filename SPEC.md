@@ -146,7 +146,11 @@ drain in order with nothing skipped. That decides which end `limit` truncates â€
 it drops the **newest** rows, so `--limit 20` is the twenty *least* recent, not
 the most recent. `truncated` says more rows matched than were returned, so a
 cold-start caller asking for a recent window can tell it got a partial answer
-instead of silently drawing stale traffic. Truncating the other way would let a
+instead of silently drawing stale traffic. The plain CLI form prints that same
+signal as a trailing `-- more rows matchâ€¦` line naming the `--since` cursor to
+continue from: a partial window carried only in `--json` is missing exactly
+where a person is reading, and an oldest-first window with no notice looks like
+a quiet fleet rather than an answer that stopped short. Truncating the other way would let a
 cursor caller skip everything between its cursor and the newest page, which is
 the worse failure.
 

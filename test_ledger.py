@@ -1185,6 +1185,38 @@ class LedgerTest(unittest.TestCase):
         self.assertTrue(capped["truncated"])
         self.assertEqual(capped["events"][0]["ts"], first_ts)
 
+    def test_plain_events_output_says_when_the_window_is_partial(self):
+        """The human form must carry the signal --json carries as `truncated`.
+
+        Without it a capped read prints the OLDEST rows and nothing else, which
+        is indistinguishable from a quiet fleet: stale traffic that looks like
+        data. The notice names the cursor so continuing is obvious.
+        """
+        self._setup_pair()
+        for _ in range(3):
+            self._peer_msg(self._wrap("sender-1"))
+        rows = json.loads(
+            self._cli("events", "--event", "peer_message", "--json").stdout)
+        self.assertTrue(rows["count"] >= 3)
+
+        out = self._cli("events", "--event", "peer_message", "--limit", "1")
+        self.assertEqual(out.returncode, 0)
+        lines = out.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 2, out.stdout)
+        self.assertIn("oldest window", lines[1])
+        # The cursor offered is the last row printed, so --since picks up
+        # exactly where this window stopped.
+        self.assertIn(f"--since {rows['events'][0]['ts']}", lines[1])
+
+    def test_plain_events_output_is_silent_when_nothing_was_dropped(self):
+        """The notice is a signal, not decoration: no truncation, no line."""
+        self._setup_pair()
+        self._peer_msg(self._wrap("sender-1"))
+        out = self._cli("events", "--event", "peer_message")
+        self.assertEqual(out.returncode, 0)
+        self.assertNotIn("oldest window", out.stdout)
+        self.assertEqual(len(out.stdout.strip().splitlines()), 1, out.stdout)
+
     def _seed_events(self, *timestamps):
         con = sqlite3.connect(self.db)
         for ts in timestamps:
