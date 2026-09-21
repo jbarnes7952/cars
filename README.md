@@ -389,6 +389,12 @@ Read it back over the CLI:
 ```bash
 python3 ledger_mcp.py events --event peer_message --since 2026-09-09T00:00:00Z --json
 # {"events": [{"ts": "…", "from": "…", "to": "…"}], "count": 1, "truncated": false}
+
+python3 ledger_mcp.py events --event peer_message --limit 3
+# 2026-09-09T17:25:04.304Z  from=… to=…
+# 2026-09-09T17:25:51.995Z  from=… to=…
+# 2026-09-09T17:36:50.313Z  from=… to=…
+# -- more rows match: this is the oldest window, not the newest. Continue with --since 2026-09-09T17:36:50.313Z
 ```
 
 Rows come oldest first, which is what a cursor wants: pass the last `ts` you
@@ -397,7 +403,10 @@ any ISO 8601 instant at any precision, with `Z` or a numeric offset, and
 normalises it, so a synthesised bound like "one minute ago" selects the same
 rows however you format it. It also means
 `--limit` drops the *newest* rows, so `--limit 20` gives the twenty least
-recent — check `truncated` to tell a partial answer from a quiet fleet.
+recent — check `truncated` to tell a partial answer from a quiet fleet. The
+plain form says so itself, with a trailing `-- more rows match…` line naming the
+cursor, so a capped read cannot be mistaken for a quiet one by someone reading
+the terminal rather than the JSON.
 
 Only `peer_message` is readable this way — `register` and `update` payloads
 carry free-text status, so the verb takes an allowlist rather than any event

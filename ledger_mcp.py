@@ -1562,6 +1562,14 @@ def cli_events(argv):
     for e in result["events"]:
         extra = " ".join(f"{k}={v}" for k, v in e.items() if k != "ts")
         print(f"{e['ts']}  {extra}")
+    if result["truncated"]:
+        # --json carries `truncated`; without this the plain form drops it,
+        # and a partial window reads exactly like a quiet fleet. Since limit
+        # sheds the newest rows, what a reader is handed is the OLDEST window
+        # -- stale traffic that looks like data rather than like an answer
+        # that stops short. Name the cursor so the next call is obvious.
+        print("-- more rows match: this is the oldest window, not the newest."
+              f" Continue with --since {result['events'][-1]['ts']}")
 
 
 def hook_roster():
