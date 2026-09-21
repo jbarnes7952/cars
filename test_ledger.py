@@ -1217,6 +1217,84 @@ class LedgerTest(unittest.TestCase):
         self.assertNotIn("oldest window", out.stdout)
         self.assertEqual(len(out.stdout.strip().splitlines()), 1, out.stdout)
 
+    def test_newest_sheds_the_old_end_and_stays_chronological(self):
+        """--newest keeps the last rows, still oldest-to-newest.
+
+        A consumer sets its cursor from the LAST row of the window. Returning
+        the newest window in reverse would land that cursor on the window's
+        oldest row, and every later poll would re-fetch rows already drawn.
+        """
+        self._setup_pair()
+        self._seed_events("2026-01-01T00:00:01.000Z",
+                          "2026-01-01T00:00:02.000Z",
+                          "2026-01-01T00:00:03.000Z")
+        out = json.loads(self._cli("events", "--event", "peer_message",
+                                   "--newest", "--limit", "2",
+                                   "--json").stdout)
+        self.assertEqual([e["ts"] for e in out["events"]],
+                         ["2026-01-01T00:00:02.000Z",
+                          "2026-01-01T00:00:03.000Z"])
+        # Truncation now means rows were dropped from the OLDER end.
+        self.assertTrue(out["truncated"])
+
+    def test_newest_limit_one_is_the_single_newest_row(self):
+        """The priming read: the present in one call, no backlog to walk."""
+        self._setup_pair()
+        self._seed_events("2026-01-01T00:00:01.000Z",
+                          "2026-01-01T00:00:02.000Z",
+                          "2026-01-01T00:00:03.000Z")
+        out = json.loads(self._cli("events", "--event", "peer_message",
+                                   "--newest", "--limit", "1",
+                                   "--json").stdout)
+        self.assertEqual(out["count"], 1)
+        self.assertEqual(out["events"][0]["ts"], "2026-01-01T00:00:03.000Z")
+
+    def test_newest_without_limit_matches_the_ascending_read(self):
+        """Below the limit there is nothing to shed, so both ends agree."""
+        self._setup_pair()
+        self._seed_events("2026-01-01T00:00:01.000Z",
+                          "2026-01-01T00:00:02.000Z")
+        asc = json.loads(self._cli("events", "--event", "peer_message",
+                                   "--json").stdout)
+        new = json.loads(self._cli("events", "--event", "peer_message",
+                                   "--newest", "--json").stdout)
+        self.assertEqual(asc["events"], new["events"])
+        self.assertFalse(new["truncated"])
+
+    def test_newest_and_since_together_are_refused(self):
+        """An ambiguous request declined rather than answered confidently.
+
+        Together they would mean "the newest N after this cursor", silently
+        dropping everything between the cursor and that window -- the failure
+        oldest-first exists to prevent, wearing both hats.
+        """
+        self._setup_pair()
+        self._seed_events("2026-01-01T00:00:01.000Z")
+        out = self._cli("events", "--event", "peer_message", "--newest",
+                        "--since", "2026-01-01T00:00:00.000Z", "--json")
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("mutually exclusive", out.stderr)
+        self.assertEqual(out.stdout, "")
+
+    def test_plain_newest_notice_reports_history_behind_it(self):
+        """The newest window is already the present; what is missing is behind.
+
+        So it must not offer a --since cursor: that would point forward from
+        rows the caller already has, implying the gap is ahead when it is
+        behind.
+        """
+        self._setup_pair()
+        self._seed_events("2026-01-01T00:00:01.000Z",
+                          "2026-01-01T00:00:02.000Z")
+        out = self._cli("events", "--event", "peer_message", "--newest",
+                        "--limit", "1")
+        self.assertEqual(out.returncode, 0)
+        lines = out.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 2, out.stdout)
+        self.assertIn("newest window", lines[1])
+        self.assertIn("older history", lines[1])
+        self.assertNotIn("--since", lines[1])
+
     def _seed_events(self, *timestamps):
         con = sqlite3.connect(self.db)
         for ts in timestamps:

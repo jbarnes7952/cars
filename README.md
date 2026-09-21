@@ -395,6 +395,9 @@ python3 ledger_mcp.py events --event peer_message --limit 3
 # 2026-09-09T17:25:51.995Z  from=… to=…
 # 2026-09-09T17:36:50.313Z  from=… to=…
 # -- more rows match: this is the oldest window, not the newest. Continue with --since 2026-09-09T17:36:50.313Z
+
+python3 ledger_mcp.py events --event peer_message --newest --limit 1 --json
+# {"events": [{"ts": "…newest row…", "from": "…", "to": "…"}], "count": 1, "truncated": true}
 ```
 
 Rows come oldest first, which is what a cursor wants: pass the last `ts` you
@@ -407,6 +410,16 @@ recent — check `truncated` to tell a partial answer from a quiet fleet. The
 plain form says so itself, with a trailing `-- more rows match…` line naming the
 cursor, so a capped read cannot be mistaken for a quiet one by someone reading
 the terminal rather than the JSON.
+
+**`--newest` sheds the other end**: the last `limit` rows, still oldest-to-newest
+so the window's last row is the newest one and works as the cursor for every
+poll after. It is what a cold reader wants — `--newest --limit 1` starts a
+cursor at the present in one call, instead of walking the whole backlog to reach
+it, which on an append-only table costs a call per page forever. It is a flag
+rather than a count, so `--limit` keeps saying how many. `--newest` and `--since`
+together exit 2: that combination would mean "the newest N after this cursor"
+and silently drop everything in between, so it is refused rather than
+interpreted.
 
 Only `peer_message` is readable this way — `register` and `update` payloads
 carry free-text status, so the verb takes an allowlist rather than any event
