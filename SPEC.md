@@ -129,8 +129,8 @@ the time the hook sees it.
 
 ### Reading it back
 
-`ledger_mcp.py events --event peer_message [--since ISO8601] [--limit N]
-[--json]` returns `{"events": [{"ts", "from", "to"}], "count", "truncated"}`,
+`ledger_mcp.py events --event peer_message [--since ISO8601 | --newest]
+[--limit N] [--json]` returns `{"events": [{"ts", "from", "to"}], "count", "truncated"}`,
 oldest first, `since` exclusive. Indexed on `(event, ts)`; the older index
 leads on `session_name` and cannot serve this scan.
 
@@ -153,6 +153,25 @@ where a person is reading, and an oldest-first window with no notice looks like
 a quiet fleet rather than an answer that stopped short. Truncating the other way would let a
 cursor caller skip everything between its cursor and the newest page, which is
 the worse failure.
+
+`--newest` sheds from the **older** end instead, for the caller that wants a
+snapshot of the present rather than a cursor: the last `limit` rows, still
+returned oldest-to-newest so the window's last row is the newest row and
+remains a usable cursor to continue from. It is a flag, not a count — `--limit`
+says how many, `--newest` says which end to shed, so there is no `--newest 5
+--limit 10` to adjudicate. `truncated` then means rows were dropped from the
+older end: history behind the window, not traffic ahead of it.
+
+`--newest` and `--since` are **mutually exclusive, and asking for both exits
+2** rather than guessing. Together they would mean "the newest N after this
+cursor", which silently discards everything between the cursor and that
+window — precisely the failure oldest-first exists to prevent, wearing both
+hats. A caller is either walking a cursor or sampling the present.
+
+Both directions cost the same: `idx_events_event_ts` is a covering index and
+serves either scan. Reaching the present by walking instead costs a call per
+page, on a table that only grows, so the walk is a deferred version of the
+same problem rather than a substitute.
 
 Only event types on an explicit allowlist are readable, currently
 `peer_message` alone. `register` and `update` payloads carry role and status

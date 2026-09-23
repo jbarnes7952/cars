@@ -1483,8 +1483,8 @@ EVENTS_LIMIT_DEFAULT = 500
 EVENTS_LIMIT_MAX = 5000
 
 
-def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
-    """Rows of one readable event type, oldest first, `since` exclusive.
+def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT, newest=False):
+    """Rows of one readable event type, always chronological, `since` exclusive.
 
     Payload keys are flattened onto the row, so a caller drawing traffic gets
     {"ts", "from", "to"} rather than a JSON string to parse itself.
@@ -1496,7 +1496,26 @@ def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
     carries `truncated` to say more rows matched than were returned. Truncating
     the other way would let a cursor caller silently skip everything between
     its cursor and the newest page, which is the worse failure.
+
+    `newest` sheds from the OLDER end instead, for the caller that wants a
+    snapshot of the present rather than a cursor: the last `limit` rows, still
+    returned oldest-to-newest so the last row of the window is the newest row
+    and remains a usable cursor to continue from. It costs the same as the
+    ascending window -- idx_events_event_ts covers both directions -- whereas
+    reaching the present by walking an append-only table costs a call per page
+    forever.
+
+    `newest` and `since` are mutually exclusive, and asking for both is an
+    error rather than a guess. Together they would mean "the newest N after
+    this cursor", which silently discards everything between the cursor and
+    that window -- exactly the failure oldest-first exists to prevent, wearing
+    both hats. A caller is either walking a cursor or sampling the present.
     """
+    if newest and since:
+        raise ToolError(
+            "--newest and --since are mutually exclusive: --newest samples the"
+            " present, --since walks a cursor, and together they would drop"
+            " every row between the cursor and the newest window")
     if event not in READABLE_EVENTS:
         raise ToolError(
             f"event type not readable: {event}"
@@ -1515,7 +1534,7 @@ def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
         args.append(bound)
     # One more than asked, to report truncation exactly rather than guessing
     # from a full page.
-    sql += " ORDER BY ts LIMIT ?"
+    sql += " ORDER BY ts DESC LIMIT ?" if newest else " ORDER BY ts LIMIT ?"
     args.append(limit + 1)
     conn = connect()
     try:
@@ -1524,6 +1543,11 @@ def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
         conn.close()
     truncated = len(rows) > limit
     rows = rows[:limit]
+    if newest:
+        # Read descending so the extra row is shed from the OLD end, then hand
+        # it back chronological: a consumer setting its cursor from the last
+        # row of the window must land on the newest row, not the oldest.
+        rows = rows[::-1]
     out = []
     for r in rows:
         rec = {"ts": r["ts"]}
@@ -1538,7 +1562,7 @@ def read_events(event, since=None, limit=EVENTS_LIMIT_DEFAULT):
 
 
 def cli_events(argv):
-    """events --event peer_message [--since ISO] [--limit N] [--json]"""
+    """events --event peer_message [--since ISO | --newest] [--limit N] [--json]"""
     def opt(name, default=None):
         if name in argv:
             i = argv.index(name)
@@ -1548,8 +1572,11 @@ def cli_events(argv):
     event = opt("--event", READABLE_EVENTS[0])
     since = opt("--since")
     limit = opt("--limit", EVENTS_LIMIT_DEFAULT)
+    # A flag, not a count: --limit says how many, --newest says which end to
+    # shed. Orthogonal, so there is no "--newest 5 --limit 10" to adjudicate.
+    newest = "--newest" in argv
     try:
-        result = read_events(event, since, limit)
+        result = read_events(event, since, limit, newest=newest)
     except ToolError as exc:
         sys.stderr.write(str(exc) + "\n")
         sys.exit(2)
@@ -1564,12 +1591,18 @@ def cli_events(argv):
         print(f"{e['ts']}  {extra}")
     if result["truncated"]:
         # --json carries `truncated`; without this the plain form drops it,
-        # and a partial window reads exactly like a quiet fleet. Since limit
-        # sheds the newest rows, what a reader is handed is the OLDEST window
-        # -- stale traffic that looks like data rather than like an answer
-        # that stops short. Name the cursor so the next call is obvious.
-        print("-- more rows match: this is the oldest window, not the newest."
-              f" Continue with --since {result['events'][-1]['ts']}")
+        # and a partial window reads exactly like a quiet fleet. Which end was
+        # shed decides what the reader needs to hear: an ascending window is
+        # the OLDEST rows, stale traffic that looks like data, so name the
+        # cursor out of it; a --newest window is already the present, so what
+        # is missing is history behind it.
+        if newest:
+            print("-- more rows match: this is the newest window;"
+                  " older history was not fetched.")
+        else:
+            print("-- more rows match: this is the oldest window, not the"
+                  " newest."
+                  f" Continue with --since {result['events'][-1]['ts']}")
 
 
 def hook_roster():
