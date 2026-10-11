@@ -926,21 +926,26 @@ def is_reachable(rec):
     return where == PRESENCE_LIVE or not rec["stale"]
 
 
-def fresh_agents(limit=None):
-    """Reachable records, newest first. Empty list on any DB failure."""
-    try:
-        conn = connect()
-    except Exception:
-        return []
+def fresh_agents(limit=None, conn=None):
+    """Reachable records, newest first. Empty list on any DB failure.
+    A caller-held `conn` is used and left open; otherwise one is opened and
+    closed here."""
+    own = conn is None
+    if own:
+        try:
+            conn = connect()
+        except Exception:
+            return []
     try:
         rows = conn.execute("SELECT * FROM agents ORDER BY last_seen DESC").fetchall()
     finally:
-        conn.close()
+        if own:
+            conn.close()
     recs = [r for r in (row_to_record(x) for x in rows) if is_reachable(r)]
     return recs[:limit] if limit else recs
 
 
-def dynamic_agent_tools():
+def dynamic_agent_tools(conn=None):
     """The registry rendered as MCP tools — one per fresh agent, description
     = its routing card. Calling one returns the contact card; messaging is
     always native SendMessage."""
@@ -948,7 +953,8 @@ def dynamic_agent_tools():
         return []
     tools = []
     budget = _env_int("LEDGER_PEER_DESC_MAX", 420)
-    for rec in fresh_agents(_env_int("LEDGER_ROSTER_MAX", ROSTER_MAX_DEFAULT)):
+    limit = _env_int("LEDGER_ROSTER_MAX", ROSTER_MAX_DEFAULT)
+    for rec in fresh_agents(limit, conn=conn):
         name = rec["session_name"]
         proj = f" [{rec['project']}]" if rec["project"] else ""
         tools.append({
@@ -963,6 +969,50 @@ def dynamic_agent_tools():
             "inputSchema": {"type": "object", "properties": {}},
         })
     return tools
+
+
+def _db_identity():
+    try:
+        st = os.stat(DB_PATH)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+class HeldConn:
+    """One long-lived read connection for the serve() registry poll.
+
+    In WAL mode, the last connection to close checkpoints and deletes the
+    -wal/-shm files. A poll that opened and closed its own connection every
+    LEDGER_TOOLS_POLL seconds therefore created and unlinked two files per
+    poll, per server; with a dozen sessions that is a directory-metadata
+    write every second or two, which on spinning disks is an audible seek
+    every journal commit. Holding one connection open keeps those files in
+    place for every process sharing the database.
+
+    Reopens when DB_PATH starts naming a different file (moved, replaced,
+    or deleted and recreated), and after any query error."""
+
+    def __init__(self):
+        self.conn = None
+        self.identity = None
+
+    def get(self):
+        if self.conn is not None and _db_identity() != self.identity:
+            self.close()
+        if self.conn is None:
+            self.conn = connect()
+            self.identity = _db_identity()
+        return self.conn
+
+    def close(self):
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        self.conn = None
+        self.identity = None
 
 
 def call_peer_tool(tool_name):
@@ -1020,14 +1070,19 @@ def serve():
     # client last fetched; "notified" = signature we last notified about
     # (avoids re-notifying every poll if the client never re-fetches).
     state = {"served": None, "notified": None}
+    held = HeldConn()  # used only by the watcher thread
 
-    def dyn_sig():
-        return json.dumps(dynamic_agent_tools(), sort_keys=True)
+    def dyn_sig(conn=None):
+        return json.dumps(dynamic_agent_tools(conn), sort_keys=True)
 
-    def notify_if_changed():
+    def notify_if_changed(from_watcher=False):
+        # sqlite3 connections are bound to their creating thread, so only
+        # the watcher thread uses the held one.
         try:
-            sig = dyn_sig()
+            sig = dyn_sig(held.get() if from_watcher else None)
         except Exception:
+            if from_watcher:
+                held.close()
             return
         if state["served"] is not None and sig != state["served"] \
                 and sig != state["notified"]:
@@ -1041,7 +1096,7 @@ def serve():
             import time
             while True:
                 time.sleep(poll)
-                notify_if_changed()
+                notify_if_changed(from_watcher=True)
         threading.Thread(target=watcher, daemon=True).start()
 
     for line in sys.stdin:

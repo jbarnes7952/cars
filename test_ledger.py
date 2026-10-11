@@ -1489,6 +1489,44 @@ class LedgerTest(unittest.TestCase):
         self.assertLess(len(tool["description"]), 600)
         self.assertNotRegex(tool["description"], r"\w…\w")  # word-boundary cut
 
+    def test_held_conn_keeps_wal_files_across_other_connections(self):
+        # the serve() poll must not create and unlink -wal/-shm on every
+        # cycle: that directory churn is an audible seek on spinning disks
+        self.call("register", session_name="a")
+        held = self.ledger.HeldConn()
+        conn = held.get()
+        self.assertIs(held.get(), conn)  # reused, not reopened per poll
+        self.assertEqual(
+            [t["name"] for t in self.ledger.dynamic_agent_tools(conn)],
+            [t["name"] for t in self.ledger.dynamic_agent_tools()])
+        for _ in range(3):
+            self.call("heartbeat", session_name="a")  # open + close elsewhere
+            self.assertTrue(os.path.exists(self.db + "-wal"))
+            self.assertTrue(os.path.exists(self.db + "-shm"))
+        held.close()
+        self.assertFalse(os.path.exists(self.db + "-wal"))
+
+    def test_held_conn_reopens_when_db_is_replaced(self):
+        self.call("register", session_name="old")
+        held = self.ledger.HeldConn()
+        conn = held.get()
+        self.assertEqual(
+            [r["session_name"] for r in self.ledger.fresh_agents(conn=conn)],
+            ["old"])
+        # move the database aside and start a new one at the same path, as
+        # relocating ~/.claude-ledger does
+        conn.close()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.db + suffix):
+                os.rename(self.db + suffix, self.db + ".moved" + suffix)
+        self.call("register", session_name="new")
+        fresh = held.get()
+        self.assertIsNot(fresh, conn)
+        self.assertEqual(
+            [r["session_name"] for r in self.ledger.fresh_agents(conn=fresh)],
+            ["new"])
+        held.close()
+
     def test_trigger_outranks_status_in_generated_card(self):
         # a wordy status must never evict the routing tripwire
         self.call("register", session_name="p", role="r",
