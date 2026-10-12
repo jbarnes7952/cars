@@ -50,14 +50,25 @@ session — the name is its address.
 
 ## Releases
 
-This machine runs CARS as an installed plugin (`cars@cars`, directory
-marketplace at this repo) — sessions execute the **plugin cache copy**, not
-this working tree. Edits here do nothing to the fleet until released:
+This machine runs CARS as an installed plugin (`cars@cars`) from a
+**directory marketplace pointing at this checkout** — every session's
+`CLAUDE_PLUGIN_ROOT` is `~/repos/cars`, and the cache copy that
+`claude plugin update` writes is never executed. So this working tree **is**
+the fleet: an uncommitted edit, or a checked-out branch, goes live to every
+session at its next server start. Keep the checkout on `main` and clean, and
+do session work in a worktree (see the global instructions).
+
+A running `serve` process keeps the code it loaded; `/reload-plugins` does
+not restart it. Compare `server_version` from `ledger_mcp.py list --json`
+against the version on disk to tell what a session is actually running.
+
+To release:
 
 1. Tests pass (`python3 test_ledger.py`).
 2. Bump `version` in `.claude-plugin/plugin.json` AND
    `.claude-plugin/marketplace.json` in the same commit as the change.
-3. Commit, then `claude plugin update cars` to roll the fleet forward.
+3. Merge to `main` and pull the checkout; sessions pick it up as they
+   restart. `claude plugin update cars` only refreshes the install record.
 
-To try uncommitted work live without releasing: `claude --plugin-dir .` in a
-scratch session.
+To try work before merging, `claude --plugin-dir <worktree>` in a scratch
+session runs that worktree instead of the checkout.
