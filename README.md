@@ -128,7 +128,8 @@ fetched on demand via ToolSearch. CARS is designed to work under deferral:
 - The injected roster is the authoritative live peer list under deferral, and
   says so when deferral is detected (any `ENABLE_TOOL_SEARCH` other than
   `false`). On the first injection of a session it also asks the user once
-  whether to enable eager loading.
+  whether to enable eager loading — unless `LEDGER_ALWAYS_LOAD` is already
+  `core` or `all`, in which case the question is answered and it stays quiet.
 
 Knobs:
 

@@ -56,7 +56,8 @@ Config (env, set in ~/.claude/settings.json "env" block):
     LEDGER_ROSTER_LINE_MAX  roster line budget (default 200), same priorities
     LEDGER_ALWAYS_LOAD   exempt tools from client-side schema deferral via
                          _meta anthropic/alwaysLoad: none (default) | core
-                         (the six static tools) | all (peer_* tools too)
+                         (the six static tools) | all (peer_* tools too).
+                         Set, it also silences the roster's one-time ask.
 """
 
 import json
@@ -160,6 +161,12 @@ def _plugin_version():
             return json.load(f).get("version") or "unknown"
     except (OSError, ValueError):
         return "unknown"
+
+
+def always_load_set():
+    """True when LEDGER_ALWAYS_LOAD already exempts the directory tools from
+    deferral (core or all), i.e. the eager-load question has been answered."""
+    return (os.environ.get("LEDGER_ALWAYS_LOAD") or "").strip().lower() in ("core", "all")
 
 
 def deferral_active():
@@ -1675,7 +1682,11 @@ def hook_roster():
     parts = [p for p in (roster,) if p]
     if own is None:
         parts.append(REGISTER_NUDGE)
-    if deferral_active() and not state.get("fl"):
+    # The ask is only worth making when the answer is not already in place:
+    # with LEDGER_ALWAYS_LOAD set the directory tools arrive loaded, and the
+    # note would be asking the user to set a variable they have set.
+    if (deferral_active() and not always_load_set()
+            and not state.get("fl")):
         parts.append(FORCELOAD_NOTE)
         state["fl"] = True
         with open(state_path, "w") as f:
