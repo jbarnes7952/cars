@@ -1523,6 +1523,7 @@ class LedgerTest(unittest.TestCase):
         self.call("register", session_name="peer-1", session_id="other")
         env = dict(os.environ, LEDGER_ROSTER_EVERY="1")
         env.pop("ENABLE_TOOL_SEARCH", None)  # unset => deferral assumed
+        env.pop("LEDGER_ALWAYS_LOAD", None)  # unanswered => ask
         def run(extra=None):
             e = dict(env, **(extra or {}))
             proc = subprocess.run(
@@ -1540,6 +1541,31 @@ class LedgerTest(unittest.TestCase):
                                 "LEDGER_ROSTER_EVERY": "1"}))[
             "hookSpecificOutput"]["additionalContext"]
         self.assertNotIn("schemas may be deferred", eager)
+
+    def test_roster_forceload_ask_is_silent_once_answered(self):
+        """LEDGER_ALWAYS_LOAD=core|all is the answer the ask is after; with
+        it set, asking again every session is noise. The deferral header
+        stays, since peer ask_* tools are still deferred under core."""
+        self.call("register", session_name="peer-1", session_id="other")
+        for mode in ("core", "all", "CORE"):
+            env = dict(os.environ, LEDGER_ROSTER_EVERY="1",
+                       LEDGER_ALWAYS_LOAD=mode)
+            env.pop("ENABLE_TOOL_SEARCH", None)
+            proc = subprocess.run(
+                [sys.executable, SERVER, "hook-roster"],
+                input=json.dumps({"session_id": "sess-" + mode, "cwd": "/nope"}),
+                capture_output=True, text=True, env=env)
+            ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertNotIn("LEDGER_ALWAYS_LOAD", ctx, mode)
+            self.assertIn("schemas may be deferred", ctx, mode)
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="1", LEDGER_ALWAYS_LOAD="none")
+        env.pop("ENABLE_TOOL_SEARCH", None)
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": "sess-none", "cwd": "/nope"}),
+            capture_output=True, text=True, env=env)
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("LEDGER_ALWAYS_LOAD", ctx, "none is not an answer")
 
     def test_watcher_notifies_on_external_registration(self):
         import threading
