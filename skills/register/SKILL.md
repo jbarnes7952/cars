@@ -16,7 +16,8 @@ primary key of the ledger entry.
 Try in order:
 1. A session name already established in this conversation — the user told
    you, a rename notice appears in context ("the user named this session X"),
-   or a prior `/register` here used one.
+   the ledger's register nudge named this session's title, or a prior
+   `/register` here used one.
 2. `$CLAUDE_LEDGER_NAME` (check via Bash: `echo "$CLAUDE_LEDGER_NAME"`).
 3. Otherwise **omit `session_name` entirely** — the server registers this
    session under its self-derived transport address (`uds:...`), which is
@@ -58,6 +59,6 @@ under a different name, ask the user before `mcp__ledger__deregister`-ing it.
 ## 3. Report
 
 One or two sentences: the stored `session_name`, role, project, and whether it
-was a fresh registration or an update. The tmux window relabels automatically
-via a PostToolUse hook when `project` is set — do not rename it yourself, and
-never use `/rename` on a registered session.
+was a fresh registration or an update. The tmux window was labelled from the
+session title at session start — do not rename it yourself, and never use
+`/rename` on a registered session.

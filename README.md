@@ -28,7 +28,7 @@ hooks/
   roster-inject.sh <channel>   UserPromptSubmit/PostToolUse → periodic peer-roster context push (wired)
                                <channel> is `prompt` or `tool`; the cadence is gated in shell
                                so python3 only starts on a firing tick
-  tmux-relabel.sh              PostToolUse → tmux window/pane label (wired)
+  session-start-title.sh       SessionStart → title an untitled session, label tmux once (wired)
   heartbeat.sh                 UserPromptSubmit/PostToolUse/Stop → bump last_seen (wired)
   session-end-deregister.sh    SessionEnd → deregister own row (wired)
   session-start-register.sh    SessionStart → register (auto mode, unwired)
@@ -46,8 +46,6 @@ resolving the session name from `$CLAUDE_LEDGER_NAME`, the conversation, or
 by asking the user, never by deriving one — and `/deregister` removes it.
 The skills live in `skills/` and are symlinked into `~/.claude/skills/`.
 Missed deregisters are harmless: stale after 10 min, evicted after 24 h.
-The PostToolUse tmux-relabel hook stays wired since it triggers off the
-in-session ledger tool calls.
 
 **Roster push (wired).** So sessions *know about* their peers without having
 to think to call `find_agents`, a `UserPromptSubmit` hook
@@ -85,10 +83,14 @@ self-matching is exact.
 **Self-addressing (zero-touch registration).** A session usually cannot see
 its own display name (`claude --name` reaches the UI and ListAgents but is
 never injected into model context; only `/rename` produces an in-context
-notice). So `register` treats `session_name` as optional: omitted, the server
-derives the session's **transport address** — `uds:<cc-socks socket>`, found
-by walking ancestor processes — which is directly routable via SendMessage
-(field-verified) and cannot be wrong. The name is just an ID; the entry's
+notice). With the session-title hook wired (the default, see
+[Session title and tmux label](#session-title-and-tmux-label)) the register
+nudge names this session's title, so the model passes it as `session_name`
+and the entry matches the address peers see. Failing that, `register` treats
+`session_name` as optional: omitted, the server derives the session's
+**transport address** — `uds:<cc-socks socket>`, found by walking ancestor
+processes — which is directly routable via SendMessage (field-verified) and
+cannot be wrong. The name is just an ID; the entry's
 value is its descriptive fields. When the session later learns its real name
 (rename notice, user tells it), it re-registers under it and any other rows
 with the same `session_id` are superseded (deleted with a
@@ -155,7 +157,7 @@ question.
 ## Install as a plugin (recommended)
 
 The repo is a Claude Code plugin: one install wires the MCP server, all
-current-mode hooks (roster/nudge, heartbeat, tmux relabel), and the skills,
+current-mode hooks (roster/nudge, heartbeat, session title + tmux label), and the skills,
 with no path editing.
 
 ```bash
@@ -214,11 +216,13 @@ Recommended:
 The wrapper exports `CLAUDE_LEDGER_NAME` and runs `claude --name <name>`, so
 the ledger entry is guaranteed to match the address peers see in `ListAgents`.
 
-Direct `claude` launches still work: the SessionStart hook registers a
-**derived** name (`<cwd-basename>-<session_id[:4]>`) flagged with
-`name_source: "derived"` in the register event. A derived name may not match
-the real messaging name, so the CLAUDE.md snippet instructs Claude to correct
-its registration on the first turn.
+Direct `claude` launches still work: the session-title hook gives an
+untitled session the title `<project>-<session_id[:4]>` (git-root basename,
+else cwd basename), and the auto-register hook, where wired, registers that
+same string, flagged `name_source: "derived"` in the register event. With
+`LEDGER_SESSION_TITLE=0` the hook falls back to the transport address, and a
+derived name may then not match the real messaging name, so the CLAUDE.md
+snippet instructs Claude to correct its registration on the first turn.
 
 ### Registering on behalf of a spawned session
 
@@ -236,7 +240,8 @@ explicitly:
   name, so the two upserts land on one row instead of colliding.
 - Pass the human label through `claude -n <label>` and `CLAUDE_LEDGER_NAME`
   in the child's environment, so `ListAgents`, the tmux window, and the
-  hook-side name fallback all agree. It is a label, not the ledger key.
+  hook-side name fallback all agree. It is a label, not the ledger key. The
+  session-title hook sees that title (or the env var) and leaves it alone.
 - Pass `session_id` when known. Heartbeats and the SessionEnd deregister
   match on it first, and a later registration under a different name with
   the same `session_id` supersedes the spawner's row cleanly.
@@ -252,16 +257,20 @@ child.
 Priority order:
 
 1. `$CLAUDE_LEDGER_NAME` (set by `launch-session.sh`) — authoritative.
-2. `session_title` from hook stdin — **per current Claude Code docs this field
-   is not delivered to SessionStart hooks** (stdin carries `session_id`, `cwd`,
-   `hook_event_name`, but no name field, and no env var carries the `--name`
-   value either). The code still honors it if a future version adds it.
-3. Derived `basename(cwd)-<first 4 of session_id>`, flagged as above.
+2. `session_title` from hook stdin. Claude Code sends it to SessionStart
+   hooks when a custom title exists (`--name`, `/rename`, or a hook's
+   `sessionTitle` output); field-verified on 2.1.296.
+3. With `LEDGER_SESSION_TITLE` on (default): the title the session-title hook
+   gives an untitled session, `<project>-<first 4 of session_id>`, so the row
+   and the title agree by construction. Flagged `name_source: "derived"`.
+4. The transport address (`uds:…`).
+5. Legacy derived `basename(cwd)-<first 4 of session_id>`.
 
-`register` with no `session_name` follows the same order: `CLAUDE_LEDGER_NAME`
-first, then the transport address. Both registration paths therefore key a
-session the same way — previously the hook used the env var and the tool used
-the address, so one session could appear under two names.
+`register` with no `session_name` goes `CLAUDE_LEDGER_NAME`, then the
+transport address; it cannot see the title, which is why the register nudge
+supplies it. Both registration paths therefore key a session the same way —
+previously the hook used the env var and the tool used the address, so one
+session could appear under two names.
 
 ## Which version is actually running
 
@@ -472,12 +481,24 @@ python3 ledger_mcp.py heartbeat --json '{"session_name": "…"}'
 python3 ledger_mcp.py deregister --json '{"session_name": "…"}'
 ```
 
-## tmux relabeling
+## Session title and tmux label
 
-When a session calls `register` or `update_registration` with a `project`, the
-PostToolUse hook renames the tmux window (and disables automatic-rename).
-Set `LEDGER_TMUX_MODE=pane` to set the pane title instead (multi-pane layouts).
-No-op outside tmux.
+At SessionStart, `hooks/session-start-title.sh` (`ledger_mcp.py
+hook-session-start`) does two things, each behind its own switch:
+
+| var | default | meaning |
+|---|---|---|
+| `LEDGER_SESSION_TITLE` | `1` | if the session has no custom title, set it to `<project>-<session_id[:4]>` (git-root basename, else cwd basename) via the hook's `sessionTitle` output. A title from `--name`, `/rename` or `CLAUDE_LEDGER_NAME` is kept. `0` = off |
+| `LEDGER_TMUX_RELABEL` | `1` | label the tmux window (or pane) with the session title, **once**: only if nobody has named it yet, or the current name is one this hook set (tracked by the `@ledger_named` tmux user option). A hand-named window is never touched; `/clear` keeps the label in step. `0` = off |
+| `LEDGER_TMUX_MODE` | `window` | `window` renames the window and turns `automatic-rename` off; `pane` sets the pane title instead (multi-pane layouts). "Unnamed" means `automatic-rename` still on, or a pane title that is empty or the hostname |
+
+The title is also recorded under `roster-state/<session_id>.title`, which is
+how the register nudge can tell the model the exact `session_name` to pass.
+The hook never registers, never writes the ledger, is a no-op outside tmux,
+bounds every tmux call by one second (and stops at the first hang), and
+exits 0 unconditionally. `project` no longer drives the label; it is only a
+searchable field. Resume with a title set is a no-op; `/clear` starts a new
+session id, so it gets a fresh title and the label follows.
 
 ## Fallback behavior
 
@@ -509,6 +530,6 @@ python3 test_ledger.py
 
 Covers: schema idempotency, register/upsert, partial update, heartbeat
 sampling, find/list with staleness flags, lazy eviction, idempotent
-deregister, hook name resolution, the CLI verbs (`register`/`update`/
-`heartbeat`/`deregister`/`list --json`), and the MCP stdio handshake
-end-to-end.
+deregister, hook name resolution, the session-title hook (with a faked
+tmux), the CLI verbs (`register`/`update`/`heartbeat`/`deregister`/`list
+--json`), and the MCP stdio handshake end-to-end.
