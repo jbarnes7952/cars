@@ -4,6 +4,7 @@
 import glob
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -1882,6 +1883,34 @@ class LedgerTest(unittest.TestCase):
             example = f.read()
         self.assertNotIn("tmux-relabel", example)
         self.assertIn("session-start-title.sh", example)
+
+
+class NoPersonalPathsTest(unittest.TestCase):
+    """The repo is public and installed on other machines: no tracked file
+    may name a user's home directory. Placeholders such as /path/to/cars and
+    ~/tools/cars are fine; a real /home/<user> or /Users/<user> is not."""
+
+    # Built so this file's own source does not match it.
+    PERSONAL_PATH = re.compile(r"/(?:home|Users)/(?!<)[A-Za-z0-9._-]+")
+
+    def test_no_tracked_file_names_a_home_directory(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        try:
+            files = subprocess.run(
+                ["git", "-C", root, "ls-files", "-z"], capture_output=True,
+                text=True, check=True, timeout=10).stdout.split("\0")
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("not a git checkout")
+        hits = []
+        for rel in filter(None, files):
+            try:
+                with open(os.path.join(root, rel), encoding="utf-8") as f:
+                    for n, line in enumerate(f, 1):
+                        if self.PERSONAL_PATH.search(line):
+                            hits.append(f"{rel}:{n}: {line.strip()[:80]}")
+            except (OSError, UnicodeDecodeError):
+                continue
+        self.assertEqual(hits, [], "personal paths in tracked files")
 
 
 if __name__ == "__main__":
