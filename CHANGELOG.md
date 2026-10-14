@@ -4,6 +4,13 @@ One entry per tagged release. Versions match `.claude-plugin/plugin.json`
 and the `vX.Y.Z` git tag. Releases before 1.18.0 are untagged; see the git
 log for them.
 
+## 1.18.5
+
+- Peer tools are callable under the name `tools/list` advertises. Since
+  1.6 they have been listed as `ask_<agent>__<role-slug>`, but `tools/call`
+  only routed the legacy `peer_*` prefix to the peer handler, so every
+  advertised peer tool answered `unknown tool`. Both prefixes now route. (#27)
+
 ## 1.18.4
 
 - Presence checks a declared pid with `os.kill(pid, 0)` instead of looking
