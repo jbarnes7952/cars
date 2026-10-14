@@ -1515,6 +1515,29 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(card["session_name"], "pg-owner")
         self.assertIn("SendMessage", card["contact"])
 
+    def test_advertised_ask_tool_is_callable_over_stdio(self):
+        """The name tools/list advertises must be the name tools/call accepts:
+        calling an ask_* tool exactly as listed returned "unknown tool"."""
+        self.call("register", session_name="pg-owner", role="schema-owner")
+        uds = "uds:/run/user/1000/cc-socks/424242.sock"
+        # a live declared pid keeps a row whose socket this test cannot create
+        self.call("register", session_name=uds, role="pi kiosk owner", pid=os.getpid())
+        listed = self._stdio([self.INIT,
+                              {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])[0]
+        asks = sorted(t["name"] for t in listed[2]["result"]["tools"]
+                      if t["name"].startswith("ask_"))
+        self.assertEqual(len(asks), 2, asks)
+        calls = [{"jsonrpc": "2.0", "id": 10 + i, "method": "tools/call",
+                  "params": {"name": name, "arguments": {}}}
+                 for i, name in enumerate(asks)]
+        responses, _ = self._stdio([self.INIT] + calls)
+        got = set()
+        for i, name in enumerate(asks):
+            result = responses[10 + i].get("result") or {}
+            self.assertFalse(result.get("isError"), (name, responses[10 + i]))
+            got.add(json.loads(result["content"][0]["text"])["session_name"])
+        self.assertEqual(got, {"pg-owner", uds})
+
     def test_agent_tools_disabled(self):
         self.call("register", session_name="pg-owner")
         msgs = [self.INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]

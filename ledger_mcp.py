@@ -1211,7 +1211,8 @@ def serve():
             params = msg.get("params", {})
             name = params.get("name") or ""
             try:
-                if name.startswith("peer_") and name not in TOOLS_BY_NAME:
+                # ask_* is the advertised peer-tool name; peer_* the pre-1.6 one.
+                if name.startswith(("ask_", "peer_")) and name not in TOOLS_BY_NAME:
                     result = call_peer_tool(name)
                 else:
                     result = call_tool(name, params.get("arguments") or {})
