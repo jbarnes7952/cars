@@ -52,7 +52,7 @@ session — the name is its address.
 
 This machine runs CARS as an installed plugin (`cars@cars`) from a
 **directory marketplace pointing at this checkout** — every session's
-`CLAUDE_PLUGIN_ROOT` is `~/repos/cars`, and the cache copy that
+`CLAUDE_PLUGIN_ROOT` is this checkout, and the cache copy that
 `claude plugin update` writes is never executed. So this working tree **is**
 the fleet: an uncommitted edit, or a checked-out branch, goes live to every
 session at its next server start. Keep the checkout on `main` and clean, and
