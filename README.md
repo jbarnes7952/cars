@@ -161,13 +161,14 @@ current-mode hooks (roster/nudge, heartbeat, session title + tmux label), and th
 with no path editing.
 
 ```bash
-# from a local checkout
-claude plugin install /path/to/cars
+# from the Ark Project catalog (cars and its sibling plugins, pinned releases)
+claude plugin marketplace add jbarnes7952/ark-marketplace
+claude plugin install cars@ark-project
 
-# or via the bundled marketplace (.claude-plugin/marketplace.json);
-# repo is currently private, so the machine needs GitHub auth:
-/plugin marketplace add jbarnes7952/cars
-/plugin install cars@cars
+# or from a local checkout (a directory marketplace: sessions then run that
+# working tree directly, see "Which version is actually running")
+claude plugin marketplace add /path/to/cars
+claude plugin install cars@cars
 ```
 
 Plugin installs differ from manual installs in two visible ways:
