@@ -67,8 +67,15 @@ To release:
 1. Tests pass (`python3 test_ledger.py`).
 2. Bump `version` in `.claude-plugin/plugin.json` AND
    `.claude-plugin/marketplace.json` in the same commit as the change.
-3. Merge to `main` and pull the checkout; sessions pick it up as they
-   restart. `claude plugin update cars` only refreshes the install record.
+3. Merge to `main` and pull the checkout. Hooks and skills pick it up on
+   their next firing, a `serve` process on its next start.
+   `claude plugin update cars` only refreshes the install record.
+4. Tag the squash commit on `main` and push the tag:
+   `git tag -a vX.Y.Z <sha> -m "cars X.Y.Z: <summary>" && git push origin vX.Y.Z`.
+   The tag matches the manifest version. Downstream catalogs (the
+   `ark-project` marketplace) pin a tag plus sha, so an untagged release
+   cannot be pinned cleanly. Tags start at v1.18.0; earlier releases are
+   untagged.
 
 To try work before merging, `claude --plugin-dir <worktree>` in a scratch
 session runs that worktree instead of the checkout.
