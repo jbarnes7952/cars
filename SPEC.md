@@ -243,7 +243,7 @@ Reads hook JSON from stdin (`session_id`, `cwd`). Determines the session name in
 Registers with `role: "unassigned"`, `status: "starting"`, `project` inferred as `basename` of the git repo root if `cwd` is inside a git repo, else `basename(cwd)`. Captures `$TMUX_PANE` if set. Must exit 0 fast (<200ms) and exit 0 even if the ledger is unreachable — registration failure is never allowed to disturb session start.
 
 ### SessionEnd → deregister
-Calls `deregister` with the same name resolution. Exit 0 unconditionally.
+Deletes this session's own row, matched strictly: by `session_id`, then this session's transport address, then the resolved name. Never by `cwd`: a shared directory is a guess, and acting on it deletes a peer. When the hook knows its `session_id`, a row carrying a different one is never treated as its own, by this hook or by heartbeat, peer-message or roster matching. Exit 0 unconditionally.
 
 ### SessionStart → session title + tmux label
 A sibling SessionStart hook that never registers. Two behaviours, each with its own switch:

@@ -1404,20 +1404,37 @@ def hook_session_start():
 
 
 def hook_deregister():
-    """SessionEnd hook: remove this session's own row, found the same way
-    heartbeats find it. No-op if the session never registered."""
+    """SessionEnd hook: remove this session's own row. No-op if the session
+    never registered.
+
+    Matched strictly: session_id, transport address or resolved name, never
+    a shared cwd. A cwd match is a guess about which row is ours, and acting
+    on a guess here deletes a live peer (issue #23: an unregistered session
+    exiting in the same directory as a registered one removed its row). The
+    register path refuses the cwd fallback for the same reason."""
     hook = read_hook_input()
-    own = find_own_row(hook)
+    own = find_own_row(hook, strict=True)
     if own is not None:
         call_tool("deregister", {"session_name": own["session_name"]})
 
 
-def find_own_row(hook):
+def _is_foreign(row, sid):
+    """A row that carries a session_id other than ours is another session's,
+    however else it matches."""
+    return bool(sid and row["session_id"] and row["session_id"] != sid)
+
+
+def find_own_row(hook, strict=False):
     """Best-effort match of this session to its ledger row.
 
-    A manually /register-ed session may use a name unrelated to the derived
-    one and carry no session_id, so match by session_id first, then by unique
-    cwd (session-per-worktree makes cwd a good key), then by resolved name.
+    Order: session_id, then this session's transport address, then a unique
+    cwd, then the resolved name. When the hook knows our session_id, every
+    fallback skips rows that carry a different one, so a peer sharing our
+    directory is never taken for us.
+
+    The cwd step exists for a manually /register-ed row that has no
+    session_id yet (the first heartbeat backfills it). It is a guess, so
+    strict=True drops it; callers that delete pass strict.
     Returns the record dict or None.
     """
     sid = hook.get("session_id") or ""
@@ -1426,6 +1443,13 @@ def find_own_row(hook):
         conn = connect()
     except Exception:
         return None
+
+    def by_name(name):
+        row = conn.execute(
+            "SELECT * FROM agents WHERE session_name = ?", (name,)
+        ).fetchone()
+        return row_to_record(row) if row and not _is_foreign(row, sid) else None
+
     try:
         if sid:
             row = conn.execute(
@@ -1433,23 +1457,19 @@ def find_own_row(hook):
             ).fetchone()
             if row:
                 return row_to_record(row)
-        rows = conn.execute(
-            "SELECT * FROM agents WHERE cwd = ?", (cwd,)
-        ).fetchall()
-        if len(rows) == 1:
-            return row_to_record(rows[0])
         addr = self_address()
         if addr:
-            row = conn.execute(
-                "SELECT * FROM agents WHERE session_name = ?", (addr,)
-            ).fetchone()
-            if row:
-                return row_to_record(row)
+            rec = by_name(addr)
+            if rec:
+                return rec
+        if not strict:
+            rows = [r for r in conn.execute(
+                "SELECT * FROM agents WHERE cwd = ?", (cwd,)
+            ).fetchall() if not _is_foreign(r, sid)]
+            if len(rows) == 1:
+                return row_to_record(rows[0])
         name, _ = resolve_name(hook)
-        row = conn.execute(
-            "SELECT * FROM agents WHERE session_name = ?", (name,)
-        ).fetchone()
-        return row_to_record(row) if row else None
+        return by_name(name)
     finally:
         conn.close()
 
