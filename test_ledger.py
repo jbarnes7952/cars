@@ -676,30 +676,92 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(json.loads(ev[0]["payload"])["reason"],
                          "transport-socket-gone")
 
-    def test_hook_deregister_matches_own_row_by_cwd(self):
-        os.environ.pop("CLAUDE_LEDGER_NAME", None)
-        cwd = os.path.join(self.tmp.name, "own-cwd")
+    def _own_row_hook(self, verb, sid, cwd, extra_env=None):
+        """Run an own-row hook as a session with no transport address, so
+        only session_id, cwd and name can match."""
+        nosocks = os.path.join(self.tmp.name, "nosocks-own")
+        os.makedirs(nosocks, exist_ok=True)
+        env = dict(os.environ, LEDGER_SOCK_DIR=nosocks, **(extra_env or {}))
+        env.pop("CLAUDE_LEDGER_NAME", None)
+        proc = subprocess.run(
+            [sys.executable, SERVER, verb],
+            input=json.dumps({"session_id": sid, "cwd": cwd}),
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc
+
+    def _shared_dir(self, name):
+        cwd = os.path.join(self.tmp.name, name)
         os.makedirs(cwd)
-        nosocks = os.path.join(self.tmp.name, "nosocks3")
-        os.makedirs(nosocks)
+        return cwd
+
+    def test_hook_deregister_never_deletes_on_a_cwd_match(self):
+        """SessionEnd deletes, so it must not guess. A row with no
+        session_id in our cwd may be ours or a peer's; leave it alone."""
+        os.environ.pop("CLAUDE_LEDGER_NAME", None)
+        cwd = self._shared_dir("own-cwd")
         self.call("register", session_name="custom-name", cwd=cwd)
-        proc = subprocess.run(
-            [sys.executable, SERVER, "hook-deregister"],
-            input=json.dumps({"session_id": "unknown-sid", "cwd": cwd}),
-            capture_output=True, text=True,
-            env=dict(os.environ, LEDGER_SOCK_DIR=nosocks),
-        )
-        self.assertEqual(proc.returncode, 0)
+        self._own_row_hook("hook-deregister", "unknown-sid", cwd)
+        self.assertEqual(self.call("list_agents_detailed")["count"], 1)
+        self.assertEqual(self.events(event="deregister"), [])
+
+    def test_hook_deregister_removes_a_manual_row_once_backfilled(self):
+        """The real path for a manual registration: the first heartbeat
+        matches by cwd and backfills session_id, and SessionEnd then
+        deletes by session_id."""
+        cwd = self._shared_dir("manual-cwd")
+        self.call("register", session_name="custom-name", cwd=cwd)
+        self._own_row_hook("hook-heartbeat", "my-sid", cwd)
+        self._own_row_hook("hook-deregister", "my-sid", cwd)
         self.assertEqual(self.call("list_agents_detailed")["count"], 0)
-        # and an unregistered session's SessionEnd is a clean no-op
-        proc = subprocess.run(
-            [sys.executable, SERVER, "hook-deregister"],
-            input=json.dumps({"session_id": "ghost", "cwd": nosocks}),
-            capture_output=True, text=True,
-            env=dict(os.environ, LEDGER_SOCK_DIR=nosocks),
-        )
-        self.assertEqual(proc.returncode, 0)
-        self.assertEqual(len(self.events(event="deregister")), 1)
+
+    def test_hook_deregister_by_session_id(self):
+        cwd = self._shared_dir("sid-cwd")
+        self.call("register", session_name="mine", session_id="my-sid",
+                  cwd=cwd)
+        self._own_row_hook("hook-deregister", "my-sid", "/elsewhere")
+        self.assertEqual(self.call("list_agents_detailed")["count"], 0)
+
+    def test_unregistered_exit_spares_a_peer_in_the_same_cwd(self):
+        """Issue #23 as it happened: a registered peer (a commlink-registered
+        Codex session) and an unregistered Claude session share a directory;
+        the Claude session exits. The peer's row must survive."""
+        cwd = self._shared_dir("cupboard")
+        self.call("register", session_name="codex-peer",
+                  session_id="codex-sid", cwd=cwd, name_source="commlink")
+        self._own_row_hook("hook-deregister", "claude-sid", cwd)
+        names = [a["session_name"]
+                 for a in self.call("list_agents_detailed")["agents"]]
+        self.assertEqual(names, ["codex-peer"])
+        self.assertEqual(self.events(event="deregister"), [])
+        # and an unregistered session alone in its directory is a no-op
+        self._own_row_hook("hook-deregister", "ghost",
+                           self._shared_dir("empty"))
+        self.assertEqual(self.events(event="deregister"), [])
+
+    def test_unregistered_heartbeat_does_not_keep_a_peer_alive(self):
+        cwd = self._shared_dir("hb-shared")
+        self.call("register", session_name="peer", session_id="peer-sid",
+                  cwd=cwd)
+        self._own_row_hook("hook-heartbeat", "other-sid", cwd,
+                           {"LEDGER_HEARTBEAT_EVERY": "0"})
+        self.assertEqual(self.events(event="heartbeat", session_name="peer"),
+                         [])
+        rec = self.call("list_agents_detailed")["agents"][0]
+        self.assertEqual(rec["session_id"], "peer-sid")
+
+    def test_unregistered_roster_shows_the_peer_and_nudges(self):
+        """The roster must not mistake a same-cwd peer for us: it lists the
+        peer and still asks this session to register."""
+        cwd = self._shared_dir("roster-shared")
+        self.call("register", session_name="peer", session_id="peer-sid",
+                  cwd=cwd, role="the peer")
+        proc = self._own_row_hook("hook-roster", "other-sid", cwd,
+                                  {"LEDGER_ROSTER_EVERY": "1"})
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("- peer", ctx)
+        self.assertIn("NOT registered", ctx)
 
     def test_hook_register_uds_fallback(self):
         """With auto-titling off, a nameless hook registration keys by the

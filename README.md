@@ -68,8 +68,8 @@ both, so a chatty session never gets double-injected.
 Prompts are counted per session (state files under
 `~/.claude-ledger/roster-state/`, pruned after 7 days). Off-cycle prompts and
 empty rosters emit nothing — zero context cost. Stale agents and the session's
-own entry are excluded (matched by `session_id`, then unique `cwd`, then
-resolved name). Preview the current roster text with
+own entry are excluded (matched the way heartbeats match, see
+[Staleness & eviction](#staleness--eviction)). Preview the current roster text with
 `python3 ledger_mcp.py roster`.
 
 **Register nudge (self-populating directory).** If the receiving session has
@@ -324,9 +324,10 @@ session on its next server start.
 Departure cleanup, in layers:
 
 1. **SessionEnd → deregister (wired):** on clean exit the hook finds the
-   session's own row (same matching as heartbeats: `session_id` → unique
-   `cwd` → transport address → resolved name) and removes it. No-op for
-   unregistered sessions.
+   session's own row by `session_id`, transport address or resolved name and
+   removes it. It never deletes on a shared `cwd`, which could be a peer's
+   row. A manual registration is still covered, because its first heartbeat
+   backfills the `session_id`. No-op for unregistered sessions.
 2. **Dead-transport eviction:** for same-machine agents registered under a
    `uds:` address, any tool call checks whether the socket still exists; if
    not, the row is evicted immediately (`evicted` event, reason
@@ -338,8 +339,9 @@ Departure cleanup, in layers:
 To keep active sessions fresh, wire `hooks/heartbeat.sh` into the
 UserPromptSubmit, PostToolUse, and Stop events (async, timeout 10). It calls
 `ledger_mcp.py hook-heartbeat`, which matches this session's row by
-`session_id`, then unique `cwd`, then the resolved name — so manually
-`/register`-ed sessions with custom names are covered too. Throttled to one
+`session_id`, then transport address, then unique `cwd`, then the resolved
+name — so manually `/register`-ed sessions with custom names are covered
+too. A row that carries another session's `session_id` is never matched. Throttled to one
 DB write per `LEDGER_HEARTBEAT_EVERY` seconds (default 60) per session, keyed
 on the `session_id` in the hook payload and held in `roster-state/<id>.hb`
 alongside the roster counters, so the same 7-day prune reaps it.
