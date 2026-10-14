@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -276,6 +277,86 @@ class LedgerTest(unittest.TestCase):
                  self.call("list_agents_detailed", include_stale=True)["agents"]}
         self.assertIn("ghost-2", names, "an outdated process must not delete")
         self.assertEqual(self.events(event="evicted", session_name="ghost-2"), [])
+
+    def _server_row(self, pid, version):
+        conn = self.ledger.connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO servers (machine, pid, version, started_at)"
+                " VALUES (?, ?, ?, ?)",
+                (socket.gethostname(), pid, version, self.ledger.now_iso()))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _dead_pid(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def _evict_with_fresh_conn(self):
+        conn = self.ledger.connect()
+        try:
+            self.ledger.evict_stale(conn)
+        finally:
+            conn.close()
+
+    def test_older_server_stands_down_while_a_newer_one_runs(self):
+        """Each release installs to its own directory, so an old process's own
+        file never changes: the stamp check alone cannot catch it. A newer
+        server that is running is what makes this one out of date."""
+        self.call("register", session_name="ghost-n", session_id="gn")
+        self._age("ghost-n", 48 * 3600)
+        self._server_row(os.getppid(), "999.0.0")
+        self._evict_with_fresh_conn()
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertIn("ghost-n", names, "an older process must not delete")
+
+    def test_a_dead_newer_server_does_not_cause_a_stand_down(self):
+        """Only a running newer server counts, or one crash would stop
+        eviction everywhere for good; its row is pruned instead."""
+        dead = self._dead_pid()
+        self._server_row(dead, "999.0.0")
+        self.call("register", session_name="ghost-d", session_id="gd")
+        self._age("ghost-d", 48 * 3600)
+        self._evict_with_fresh_conn()
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertNotIn("ghost-d", names)
+        conn = self.ledger.connect()
+        try:
+            pids = [r[0] for r in conn.execute("SELECT pid FROM servers")]
+        finally:
+            conn.close()
+        self.assertNotIn(dead, pids)
+
+    def test_an_older_running_server_does_not_cause_a_stand_down(self):
+        self._server_row(os.getppid(), "0.0.1")
+        self.call("register", session_name="ghost-o", session_id="go")
+        self._age("ghost-o", 48 * 3600)
+        self._evict_with_fresh_conn()
+        names = {a["session_name"] for a in
+                 self.call("list_agents_detailed", include_stale=True)["agents"]}
+        self.assertNotIn("ghost-o", names)
+
+    def test_serve_records_its_version_and_forgets_it_on_exit(self):
+        conn = self.ledger.connect()
+        try:
+            self.ledger.record_server(conn)
+            row = conn.execute(
+                "SELECT version FROM servers WHERE pid = ?", (os.getpid(),)).fetchone()
+            self.assertEqual(row[0], self.ledger._LOADED_VERSION)
+            self.ledger.forget_server(conn)
+            self.assertIsNone(conn.execute(
+                "SELECT 1 FROM servers WHERE pid = ?", (os.getpid(),)).fetchone())
+        finally:
+            conn.close()
+
+    def test_version_key_orders_releases_numerically(self):
+        key = self.ledger._version_key
+        self.assertLess(key("1.9.0"), key("1.18.4"))
+        self.assertIsNone(key("unknown"))
 
     def test_current_process_still_evicts(self):
         """The stand-down must not disable eviction generally."""

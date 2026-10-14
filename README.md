@@ -320,7 +320,10 @@ python3 ledger_mcp.py list --json | python3 -c 'import json,sys; print(json.load
 
 `list_agents_detailed` and `find_agents` both report `server_version`. If it
 is older than the version on disk, that session is running stale code, and
-only restarting the session replaces it. A missing `server_version` means the
+only restarting the session replaces it. Since 1.18.6 such a process at least
+stops evicting while a newer `serve` is running on the same machine (each
+`serve` records its version in the `servers` table); one older than 1.18.6
+cannot tell and keeps evicting with its old rules until restarted. A missing `server_version` means the
 server predates 1.16.0.
 
 Note for directory-marketplace installs (`source: directory` pointing at a
