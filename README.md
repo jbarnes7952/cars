@@ -22,6 +22,7 @@ ledger_mcp.py              MCP server + hook helpers + CLI (single file)
 schema.sql                 agents (live state) + events (append-only audit log)
 test_ledger.py             test suite (stdlib unittest)
 SPEC.md                    the contract: schema, tools, hooks, invariants
+CHANGELOG.md               one entry per tagged release
 CLAUDE.md                  notes for Claude sessions working on this repo
 .claude-plugin/
   plugin.json                  plugin manifest (MCP server, version)
@@ -128,7 +129,7 @@ trigger condition ("message me before touching schema.sql"), not a topic.
 | var | default | meaning |
 |---|---|---|
 | `LEDGER_AGENT_TOOLS` | `1` | expose peers as tools; `0` = static six tools only |
-| `LEDGER_TOOLS_POLL` | `20` | seconds between registry polls for `list_changed`; `0` = notify only on own mutations |
+| `LEDGER_TOOLS_POLL` | `20` | seconds between registry polls for `list_changed`; `0` = notify only on own mutations. The poll holds one read connection open, so the WAL side files are not created and deleted every cycle |
 | `LEDGER_PEER_DESC_MAX` | `420` | peer tool description budget, spent priority-first: contact instruction (never cut) > `query_me_when` > role > status (dropped when tight); word-boundary trims |
 | `LEDGER_ROSTER_LINE_MAX` | `200` | roster line budget, same priority order |
 

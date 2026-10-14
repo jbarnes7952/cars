@@ -66,7 +66,8 @@ To release:
 
 1. Tests pass (`python3 test_ledger.py`).
 2. Bump `version` in `.claude-plugin/plugin.json` AND
-   `.claude-plugin/marketplace.json` in the same commit as the change.
+   `.claude-plugin/marketplace.json`, and add a `CHANGELOG.md` entry, in
+   the same commit as the change.
 3. Merge to `main` and pull the checkout. Hooks and skills pick it up on
    their next firing, a `serve` process on its next start.
    `claude plugin update cars` only refreshes the install record.
