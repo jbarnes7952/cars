@@ -20,41 +20,52 @@ Code's operation depends on it.
 ```
 ledger_mcp.py              MCP server + hook helpers + CLI (single file)
 schema.sql                 agents (live state) + events (append-only audit log)
+test_ledger.py             test suite (stdlib unittest)
+SPEC.md                    the contract: schema, tools, hooks, invariants
+CHANGELOG.md               one entry per tagged release
+CLAUDE.md                  notes for Claude sessions working on this repo
+.claude-plugin/
+  plugin.json                  plugin manifest (MCP server, version)
+  marketplace.json             single-plugin marketplace for `plugin install cars@cars`
 skills/
-  register/SKILL.md            /register — in-session manual upsert (current mode)
-  deregister/SKILL.md          /deregister — in-session manual removal
+  register/SKILL.md            /register — manual register/update fallback
+  deregister/SKILL.md          /deregister — manual removal
 hooks/
-  peer-message.sh              UserPromptSubmit → log that a peer message arrived (wired)
-  roster-inject.sh <channel>   UserPromptSubmit/PostToolUse → periodic peer-roster context push (wired)
+  hooks.json                   plugin hook wiring (everything marked "wired" below)
+  session-start-title.sh       SessionStart → title an untitled session, label tmux once (wired)
+  roster-inject.sh <channel>   UserPromptSubmit/PostToolUse → periodic peer roster + register nudge (wired)
                                <channel> is `prompt` or `tool`; the cadence is gated in shell
                                so python3 only starts on a firing tick
-  tmux-relabel.sh              PostToolUse → tmux window/pane label (wired)
+  peer-message.sh              UserPromptSubmit → record that a peer message arrived (wired)
   heartbeat.sh                 UserPromptSubmit/PostToolUse/Stop → bump last_seen (wired)
   session-end-deregister.sh    SessionEnd → deregister own row (wired)
-  session-start-register.sh    SessionStart → register (auto mode, unwired)
-launch-session.sh          auto-mode launcher: mints name, exports it, runs claude --name
+  session-start-register.sh    SessionStart → register from hooks (unwired, see below)
+launch-session.sh          launcher: mints a name, exports it, runs claude --name
 claude-md-snippet.md       protocol block to paste into CLAUDE.md
-examples/settings.json     hook wiring example (auto mode)
-examples/mcp.json          MCP registration example
+examples/settings.json     hook + env wiring for a manual install
+examples/mcp.json          MCP registration example for a manual install
 ```
 
 ## Operating modes
 
-**Manual (current).** Registration and updates are triggered *in session* by
-the user: `/register [role / focus]` upserts this session's entry —
-resolving the session name from `$CLAUDE_LEDGER_NAME`, the conversation, or
-by asking the user, never by deriving one — and `/deregister` removes it.
-The skills live in `skills/` and are symlinked into `~/.claude/skills/`.
-Missed deregisters are harmless: stale after 10 min, evicted after 24 h.
-The PostToolUse tmux-relabel hook stays wired since it triggers off the
-in-session ledger tool calls.
+**Model-driven registration (current).** Hooks never register a session.
+Instead the roster hook nudges an unregistered session to register itself
+(see *Register nudge* below), and the model calls the `register` tool once
+its purpose is clear, asking an attended user first. `/register [role /
+focus]` is the manual fallback and `/deregister` removes the entry. Both
+skills ship with the plugin as `/cars:register` and `/cars:deregister`; a
+manual install symlinks `skills/*` into `~/.claude/skills/`. The skill
+resolves the name from the conversation or `$CLAUDE_LEDGER_NAME`, and
+otherwise omits it so the server uses the transport address; it never
+invents one. Missed deregisters are harmless: a row whose session is gone
+is evicted on the next tool call (see [Staleness & eviction](#staleness--eviction)).
 
 **Roster push (wired).** So sessions *know about* their peers without having
-to think to call `find_agents`, a `UserPromptSubmit` hook
-(`hooks/roster-inject.sh`, invoked with `prompt` or `tool` to select the
-cadence channel) periodically injects a compact live roster into
-context — one line per fresh agent (`name [project]: role — status; ask
-about: ...`) plus guidance to coordinate via `SendMessage` before touching a
+to think to call `find_agents`, `hooks/roster-inject.sh` runs on
+UserPromptSubmit (`prompt` channel) and PostToolUse (`tool` channel) and
+periodically injects a compact roster into context — one line per fresh
+agent (`- name [project]: role — status; ask about: ...`, trimmed to
+`LEDGER_ROSTER_LINE_MAX`) plus guidance to coordinate via `SendMessage` before touching a
 peer's project. Cadence and size are configured via env vars in the `env`
 block of `~/.claude/settings.json`:
 
@@ -70,8 +81,10 @@ both, so a chatty session never gets double-injected.
 Prompts are counted per session (state files under
 `~/.claude-ledger/roster-state/`, pruned after 7 days). Off-cycle prompts and
 empty rosters emit nothing — zero context cost. Stale agents and the session's
-own entry are excluded (matched by `session_id`, then unique `cwd`, then
-resolved name). Preview the current roster text with
+own entry are excluded (matched the way heartbeats match, see
+[Staleness & eviction](#staleness--eviction)). The roster is deliberately
+terser than `list_agents_detailed`: it skips rows that have gone quiet even
+when their session is still live. Preview the current roster text with
 `python3 ledger_mcp.py roster`.
 
 **Register nudge (self-populating directory).** If the receiving session has
@@ -85,10 +98,14 @@ self-matching is exact.
 **Self-addressing (zero-touch registration).** A session usually cannot see
 its own display name (`claude --name` reaches the UI and ListAgents but is
 never injected into model context; only `/rename` produces an in-context
-notice). So `register` treats `session_name` as optional: omitted, the server
-derives the session's **transport address** — `uds:<cc-socks socket>`, found
-by walking ancestor processes — which is directly routable via SendMessage
-(field-verified) and cannot be wrong. The name is just an ID; the entry's
+notice). With the session-title hook wired (the default, see
+[Session title and tmux label](#session-title-and-tmux-label)) the register
+nudge names this session's title, so the model passes it as `session_name`
+and the entry matches the address peers see. Failing that, `register` treats
+`session_name` as optional: omitted, the server derives the session's
+**transport address** — `uds:<cc-socks socket>`, found by walking ancestor
+processes — which is directly routable via SendMessage (field-verified) and
+cannot be wrong. The name is just an ID; the entry's
 value is its descriptive fields. When the session later learns its real name
 (rename notice, user tells it), it re-registers under it and any other rows
 with the same `session_id` are superseded (deleted with a
@@ -128,7 +145,8 @@ fetched on demand via ToolSearch. CARS is designed to work under deferral:
 - The injected roster is the authoritative live peer list under deferral, and
   says so when deferral is detected (any `ENABLE_TOOL_SEARCH` other than
   `false`). On the first injection of a session it also asks the user once
-  whether to enable eager loading.
+  whether to enable eager loading — unless `LEDGER_ALWAYS_LOAD` is already
+  `core` or `all`, in which case the question is answered and it stays quiet.
 
 Knobs:
 
@@ -143,29 +161,38 @@ Work-machine playbook (many corporate MCP servers): update Claude Code to
 roster + `find_agents`, and opt into `LEDGER_ALWAYS_LOAD=core` if the
 directory tools themselves fail to load on demand.
 
-**Automatic registration (future, currently unwired).** The SessionStart/SessionEnd hooks
-and `launch-session.sh` implement lifecycle-driven auto registration. They
-work (tested) but are deliberately not wired into settings — hooks can't see
-the session's messaging name (see "Session name resolution" below), so auto
-mode depends on the launch wrapper or a first-turn self-correction protocol.
-How to trigger registration automatically and correctly is an open design
-question.
+**Hook-driven registration (unwired).** `hooks/session-start-register.sh`
+registers a session from SessionStart with no model involvement. It works and
+is tested, but stays out of `hooks.json`: a hook can name the session
+correctly (see [Session name resolution](#session-name-resolution-hooks)),
+yet it cannot write a useful `role` or `query_me_when`, and an entry without
+those is noise in every peer's roster. Wire it yourself if bare presence is
+what you want; `launch-session.sh` pairs with it. The SessionEnd deregister
+hook *is* wired, since removing a row needs no description.
 
 ## Install as a plugin (recommended)
 
-The repo is a Claude Code plugin: one install wires the MCP server, all
-current-mode hooks (roster/nudge, heartbeat, tmux relabel), and the skills,
-with no path editing.
+The repo is a Claude Code plugin: one install wires the MCP server, every
+hook marked "wired" in [Layout](#layout) (session title + tmux label,
+roster/nudge, peer-message log, heartbeat, SessionEnd deregister), and the
+skills, with no path editing. Install is two steps, add a marketplace and
+install from it. The Ark Project catalog is the usual source and pins tagged
+releases; the repo also carries its own one-plugin marketplace for a local
+checkout:
 
 ```bash
-# from a local checkout
-claude plugin install /path/to/cars
+# from the Ark Project catalog (cars and its sibling plugins, pinned releases)
+claude plugin marketplace add jbarnes7952/ark-marketplace
+claude plugin install cars@ark-project
 
-# or via the bundled marketplace (.claude-plugin/marketplace.json);
-# repo is currently private, so the machine needs GitHub auth:
-/plugin marketplace add jbarnes7952/cars
-/plugin install cars@cars
+# or from a local checkout (a directory marketplace: sessions then run that
+# working tree directly, see "Which version is actually running")
+claude plugin marketplace add /path/to/cars
+claude plugin install cars@cars
 ```
+
+The same commands work in-session as `/plugin marketplace add …` and
+`/plugin install …`. Requires `python3` (3.8+) on `PATH`; tmux is optional.
 
 Plugin installs differ from manual installs in two visible ways:
 
@@ -198,11 +225,19 @@ switching to the plugin.
 3. Wire the hooks: merge `examples/settings.json` into `~/.claude/settings.json`
    (fix the paths).
 
-4. Paste `claude-md-snippet.md` into your user or project `CLAUDE.md`.
+4. Link the skills so `/register` and `/deregister` exist:
+
+   ```bash
+   ln -s ~/tools/cars/skills/register ~/tools/cars/skills/deregister ~/.claude/skills/
+   ```
+
+5. Paste `claude-md-snippet.md` into your user or project `CLAUDE.md`.
 
 ## Launching sessions
 
-Recommended:
+A plain `claude` launch is enough: the session-title hook names the session
+and the register nudge keys its entry by that name. `launch-session.sh` is
+for when you want to choose the name yourself:
 
 ```bash
 ~/tools/cars/launch-session.sh                      # auto name: <project>-<rand>
@@ -213,11 +248,13 @@ Recommended:
 The wrapper exports `CLAUDE_LEDGER_NAME` and runs `claude --name <name>`, so
 the ledger entry is guaranteed to match the address peers see in `ListAgents`.
 
-Direct `claude` launches still work: the SessionStart hook registers a
-**derived** name (`<cwd-basename>-<session_id[:4]>`) flagged with
-`name_source: "derived"` in the register event. A derived name may not match
-the real messaging name, so the CLAUDE.md snippet instructs Claude to correct
-its registration on the first turn.
+Direct `claude` launches still work: the session-title hook gives an
+untitled session the title `<project>-<session_id[:4]>` (git-root basename,
+else cwd basename), and the auto-register hook, where wired, registers that
+same string, flagged `name_source: "derived"` in the register event. With
+`LEDGER_SESSION_TITLE=0` there is no title to share, and both paths fall back
+to the transport address, which is routable but unreadable; re-register
+under a real name once one is known and the address row is superseded.
 
 ### Registering on behalf of a spawned session
 
@@ -235,7 +272,8 @@ explicitly:
   name, so the two upserts land on one row instead of colliding.
 - Pass the human label through `claude -n <label>` and `CLAUDE_LEDGER_NAME`
   in the child's environment, so `ListAgents`, the tmux window, and the
-  hook-side name fallback all agree. It is a label, not the ledger key.
+  hook-side name fallback all agree. It is a label, not the ledger key. The
+  session-title hook sees that title (or the env var) and leaves it alone.
 - Pass `session_id` when known. Heartbeats and the SessionEnd deregister
   match on it first, and a later registration under a different name with
   the same `session_id` supersedes the spawner's row cleanly.
@@ -251,16 +289,20 @@ child.
 Priority order:
 
 1. `$CLAUDE_LEDGER_NAME` (set by `launch-session.sh`) — authoritative.
-2. `session_title` from hook stdin — **per current Claude Code docs this field
-   is not delivered to SessionStart hooks** (stdin carries `session_id`, `cwd`,
-   `hook_event_name`, but no name field, and no env var carries the `--name`
-   value either). The code still honors it if a future version adds it.
-3. Derived `basename(cwd)-<first 4 of session_id>`, flagged as above.
+2. `session_title` from hook stdin. Claude Code sends it to SessionStart
+   hooks when a custom title exists (`--name`, `/rename`, or a hook's
+   `sessionTitle` output); field-verified on 2.1.296.
+3. With `LEDGER_SESSION_TITLE` on (default): the title the session-title hook
+   gives an untitled session, `<project>-<first 4 of session_id>`, so the row
+   and the title agree by construction. Flagged `name_source: "derived"`.
+4. The transport address (`uds:…`).
+5. Legacy derived `basename(cwd)-<first 4 of session_id>`.
 
-`register` with no `session_name` follows the same order: `CLAUDE_LEDGER_NAME`
-first, then the transport address. Both registration paths therefore key a
-session the same way — previously the hook used the env var and the tool used
-the address, so one session could appear under two names.
+`register` with no `session_name` goes `CLAUDE_LEDGER_NAME`, then the
+transport address; it cannot see the title, which is why the register nudge
+supplies it. Both registration paths therefore key a session the same way —
+previously the hook used the env var and the tool used the address, so one
+session could appear under two names.
 
 ## Which version is actually running
 
@@ -282,9 +324,12 @@ only restarting the session replaces it. A missing `server_version` means the
 server predates 1.16.0.
 
 Note for directory-marketplace installs (`source: directory` pointing at a
-checkout, which is how a development install works): every session executes
-that working tree, so a dirty tree or a checked-out branch goes live to every
-session on its next server start.
+checkout, which is how a development install works): the server, the hooks
+and the skills all run from that working tree, not from the plugin cache.
+`claude plugin update` only rewrites the install record, so pulling the
+checkout *is* the release, and a dirty tree or a checked-out branch goes live
+to every session — hooks on their next firing, the server on its next start.
+Develop in a separate worktree and try it with `claude --plugin-dir <worktree>`.
 
 ## Staleness & eviction
 
@@ -313,22 +358,23 @@ session on its next server start.
 Departure cleanup, in layers:
 
 1. **SessionEnd → deregister (wired):** on clean exit the hook finds the
-   session's own row (same matching as heartbeats: `session_id` → unique
-   `cwd` → transport address → resolved name) and removes it. No-op for
-   unregistered sessions.
-2. **Dead-transport eviction:** for same-machine agents registered under a
-   `uds:` address, any tool call checks whether the socket still exists; if
-   not, the row is evicted immediately (`evicted` event, reason
-   `transport-socket-gone`) — covers crashes and kill -9, which never fire
-   SessionEnd.
-3. **24 h idle eviction:** the backstop for named rows with no working
-   liveness signal.
+   session's own row by `session_id`, transport address or resolved name and
+   removes it. It never deletes on a shared `cwd`, which could be a peer's
+   row. A manual registration is still covered, because its first heartbeat
+   backfills the `session_id`. No-op for unregistered sessions.
+2. **Presence eviction:** any tool call judges every row's presence (above);
+   a row whose session is `gone` is evicted immediately (`evicted` event,
+   reason `transport-socket-gone`). This covers crashes and kill -9, which
+   never fire SessionEnd.
+3. **24 h idle eviction:** the backstop, applied only to rows whose presence
+   is `unknown` (no pid or address to check, or another machine's socket).
 
 To keep active sessions fresh, wire `hooks/heartbeat.sh` into the
 UserPromptSubmit, PostToolUse, and Stop events (async, timeout 10). It calls
 `ledger_mcp.py hook-heartbeat`, which matches this session's row by
-`session_id`, then unique `cwd`, then the resolved name — so manually
-`/register`-ed sessions with custom names are covered too. Throttled to one
+`session_id`, then transport address, then unique `cwd`, then the resolved
+name — so manually `/register`-ed sessions with custom names are covered
+too. A row that carries another session's `session_id` is never matched. Throttled to one
 DB write per `LEDGER_HEARTBEAT_EVERY` seconds (default 60) per session, keyed
 on the `session_id` in the hook payload and held in `roster-state/<id>.hb`
 alongside the roster counters, so the same 7-day prune reaps it.
@@ -344,11 +390,35 @@ stop, and left a state file behind each time.
 
 | tool | purpose |
 |---|---|
-| `register` | upsert full record (re-registering a name replaces the row) |
+| `register` | upsert full record (re-registering a name replaces the row); `session_name` optional, defaults to the transport address |
 | `update_registration` | partial update of `role`/`capabilities`/`query_me_when`/`status`/`project` |
 | `heartbeat` | bump `last_seen` only; optional `via` marks a supervisor heartbeating for a child |
+| `find_agents` | every word must appear in some descriptive field → returns `session_name` addresses |
+| `list_agents_detailed` | all records |
+| `deregister` | delete row (idempotent) |
+| `ask_<agent>__<role-slug>` | one per fresh peer, when `LEDGER_AGENT_TOOLS` is on; returns that peer's contact card |
 
-### Message traffic (`peer_message`)
+All return JSON. Every mutation writes an append-only `events` row in the same
+transaction (`register`/`update`/`heartbeat`/`deregister`/`evicted`; the
+peer-message hook adds `peer_message`); heartbeat
+events are sampled to at most one per 5 minutes per (session, `via`) pair, so a
+supervisor's proxied heartbeats and the session's own stay separately visible.
+Unmarked `heartbeat` events predating `via` mean *self-reported or proxied,
+unknown*: the marker starts the record rather than repairing it, and nothing
+recovers the distinction for rows written before it.
+
+A supervisor that heartbeats for a child which cannot run hooks itself (a
+non-Claude process, say) should pass `via` naming itself:
+
+```bash
+python3 ledger_mcp.py heartbeat --json '{"session_name": "…", "via": "seat"}'
+```
+
+`via` lands in the event payload only — there is no `agents` column for it, and
+freshness is unaffected: `last_seen` is bumped on every heartbeat, sampled or
+not. Sampling thins the audit log, never the liveness signal.
+
+## Message traffic (`peer_message`)
 
 `hooks/peer-message.sh` records that a cross-session message arrived, so a
 consumer can draw traffic between agents. It stores **endpoints and a timestamp
@@ -425,28 +495,6 @@ Only `peer_message` is readable this way — `register` and `update` payloads
 carry free-text status, so the verb takes an allowlist rather than any event
 name. There is no MCP tool for it: that would spend every session's context on
 a niche its consumer reaches over the CLI anyway.
-| `find_agents` | every word must appear in some descriptive field → returns `session_name` addresses |
-| `list_agents_detailed` | all records |
-| `deregister` | delete row (idempotent) |
-
-All return JSON. Every mutation writes an append-only `events` row in the same
-transaction (`register`/`update`/`heartbeat`/`deregister`/`evicted`); heartbeat
-events are sampled to at most one per 5 minutes per (session, `via`) pair, so a
-supervisor's proxied heartbeats and the session's own stay separately visible.
-Unmarked `heartbeat` events predating `via` mean *self-reported or proxied,
-unknown*: the marker starts the record rather than repairing it, and nothing
-recovers the distinction for rows written before it.
-
-A supervisor that heartbeats for a child which cannot run hooks itself (a
-non-Claude process, say) should pass `via` naming itself:
-
-```bash
-python3 ledger_mcp.py heartbeat --json '{"session_name": "…", "via": "seat"}'
-```
-
-`via` lands in the event payload only — there is no `agents` column for it, and
-freshness is unaffected: `last_seen` is bumped on every heartbeat, sampled or
-not. Sampling thins the audit log, never the liveness signal.
 
 ## CLI
 
@@ -454,8 +502,15 @@ not. Sampling thins the audit log, never the liveness signal.
 python3 ledger_mcp.py list           # pretty-print live agents
 python3 ledger_mcp.py list --stale   # include stale entries
 python3 ledger_mcp.py list --json    # the list_agents_detailed record as JSON
+python3 ledger_mcp.py roster         # preview the roster text a session would get
+python3 ledger_mcp.py self-address   # this session's uds: transport address
+python3 ledger_mcp.py events --event peer_message --newest --limit 5   # see Message traffic
+python3 ledger_mcp.py serve          # the MCP server on stdio (what the plugin runs)
 sqlite3 ~/.claude-ledger/ledger.db 'SELECT * FROM events ORDER BY id'  # full history
 ```
+
+The `hook-*` verbs are the hook entry points and read hook JSON on stdin;
+`python3 ledger_mcp.py --help` prints the full usage.
 
 The four mutating tools are also CLI verbs, for spawners and scripts that
 are not themselves MCP clients. The tool arguments are one JSON object, read
@@ -471,25 +526,39 @@ python3 ledger_mcp.py heartbeat --json '{"session_name": "…"}'
 python3 ledger_mcp.py deregister --json '{"session_name": "…"}'
 ```
 
-## tmux relabeling
+## Session title and tmux label
 
-When a session calls `register` or `update_registration` with a `project`, the
-PostToolUse hook renames the tmux window (and disables automatic-rename).
-Set `LEDGER_TMUX_MODE=pane` to set the pane title instead (multi-pane layouts).
-No-op outside tmux.
+At SessionStart, `hooks/session-start-title.sh` (`ledger_mcp.py
+hook-session-start`) does two things, each behind its own switch:
+
+| var | default | meaning |
+|---|---|---|
+| `LEDGER_SESSION_TITLE` | `1` | if the session has no custom title, set it to `<project>-<session_id[:4]>` (git-root basename, else cwd basename) via the hook's `sessionTitle` output. A title from `--name`, `/rename` or `CLAUDE_LEDGER_NAME` is kept. `0` = off |
+| `LEDGER_TMUX_RELABEL` | `1` | label the tmux window (or pane) with the session title, **once**: only if nobody has named it yet, or the current name is one this hook set (tracked by the `@ledger_named` tmux user option). A hand-named window is never touched; `/clear` keeps the label in step. `0` = off |
+| `LEDGER_TMUX_MODE` | `window` | `window` renames the window and turns `automatic-rename` off; `pane` sets the pane title instead (multi-pane layouts). "Unnamed" means `automatic-rename` still on, or a pane title that is empty or the hostname |
+
+The title is also recorded under `roster-state/<session_id>.title`, which is
+how the register nudge can tell the model the exact `session_name` to pass.
+The hook never registers, never writes the ledger, is a no-op outside tmux,
+bounds every tmux call by one second (and stops at the first hang), and
+exits 0 unconditionally. `project` no longer drives the label; it is only a
+searchable field. Resume with a title set is a no-op; `/clear` starts a new
+session id, so it gets a fresh title and the label follows.
 
 ## Fallback behavior
 
 The ledger is best-effort by design:
 
-- **Ledger down at session start:** the SessionStart hook exits 0 regardless
-  (5 s timeout, all errors swallowed). The session starts normally.
+- **Ledger down at session start:** the SessionStart title hook exits 0
+  regardless (5 s timeout, all errors swallowed). The session starts
+  normally; at worst it is left untitled.
 - **Ledger down mid-session:** `find_agents` fails ⇒ Claude falls back to
   native `ListAgents` and messages peers directly.
 - **Stale entry / failed delivery:** same fallback — `ListAgents` is ground
   truth for reachability; the ledger only adds routing metadata.
-- **Killed sessions (no SessionEnd):** entry goes stale after 10 min, is
-  evicted after 24 h with an `evicted` event.
+- **Killed sessions (no SessionEnd):** the row is evicted on the next tool
+  call once its socket or pid is gone, with an `evicted` event. Only a row
+  whose presence cannot be checked waits out the 24 h fallback.
 
 ## Design constraints (do not violate)
 
@@ -506,8 +575,12 @@ The ledger is best-effort by design:
 python3 test_ledger.py
 ```
 
-Covers: schema idempotency, register/upsert, partial update, heartbeat
-sampling, find/list with staleness flags, lazy eviction, idempotent
-deregister, hook name resolution, the CLI verbs (`register`/`update`/
-`heartbeat`/`deregister`/`list --json`), and the MCP stdio handshake
-end-to-end.
+Stdlib `unittest`, no fixtures to install; every test uses a temporary
+database and socket directory, so the suite never touches your live ledger.
+Covers: schema idempotency, register/upsert and
+supersession, partial update, heartbeat throttling and `via` sampling,
+find/list with staleness and presence, eviction, the roster and register
+nudge, peer tools and `list_changed`, the peer-message hook and `events`
+reader, hook name resolution, the session-title hook (with a faked tmux),
+the shell wrappers, the CLI verbs, and the MCP stdio handshake end to end.
+Run it before every commit.

@@ -2,14 +2,14 @@
   "name": "cars",
   "description": "Peer-session coordination tooling for Claude Code: the CARS session ledger.",
   "owner": {
-    "name": "jbarnes"
+    "name": "The Ark Project"
   },
   "plugins": [
     {
       "name": "cars",
       "source": "./",
-      "version": "1.17.1",
-      "description": "Peer Session Ledger: discovery directory for Claude Code sessions — register role/capabilities, find who to SendMessage. Bundles the ledger MCP server, roster/nudge + heartbeat + tmux hooks, and /cars:register + /cars:deregister skills."
+      "version": "1.18.3",
+      "description": "Peer Session Ledger: discovery directory for Claude Code sessions — register role/capabilities, find who to SendMessage. Bundles the ledger MCP server, roster/nudge + heartbeat + session-title/tmux hooks, and /cars:register + /cars:deregister skills."
     }
   ]
 }

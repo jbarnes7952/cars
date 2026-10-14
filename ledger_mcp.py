@@ -9,6 +9,10 @@ Zero dependencies: Python stdlib only (sqlite3, json). Localhost only.
 Usage:
     ledger_mcp.py [serve]          MCP server on stdio (default)
     ledger_mcp.py hook-register    SessionStart hook helper (hook JSON on stdin)
+    ledger_mcp.py hook-session-start
+                                   SessionStart hook: title an untitled session
+                                   <project>-<sid[:4]> and label the tmux
+                                   window/pane with it once (hook JSON on stdin)
     ledger_mcp.py hook-deregister  SessionEnd hook helper (hook JSON on stdin)
     ledger_mcp.py hook-roster      UserPromptSubmit hook: every Nth prompt,
                                    emit the peer roster as additionalContext
@@ -56,7 +60,14 @@ Config (env, set in ~/.claude/settings.json "env" block):
     LEDGER_ROSTER_LINE_MAX  roster line budget (default 200), same priorities
     LEDGER_ALWAYS_LOAD   exempt tools from client-side schema deferral via
                          _meta anthropic/alwaysLoad: none (default) | core
-                         (the six static tools) | all (peer_* tools too)
+                         (the six static tools) | all (peer_* tools too).
+                         Set, it also silences the roster's one-time ask.
+    LEDGER_SESSION_TITLE at SessionStart, give an untitled session the title
+                         <project>-<sid[:4]> (default 1; 0=off)
+    LEDGER_TMUX_RELABEL  at SessionStart, label the tmux window/pane with the
+                         session title, only if nobody named it yet
+                         (default 1; 0=off)
+    LEDGER_TMUX_MODE     window (default) | pane: which tmux object is labelled
 """
 
 import json
@@ -119,6 +130,10 @@ ROSTER_EVERY_DEFAULT = 5           # inject roster every N prompts (env LEDGER_R
 ROSTER_TOOLS_EVERY_DEFAULT = 25    # inject every N tool calls (env LEDGER_ROSTER_TOOLS_EVERY)
 ROSTER_MAX_DEFAULT = 15            # max agents per roster (env LEDGER_ROSTER_MAX)
 ROSTER_STATE_MAX_AGE = 7 * 24 * 3600  # prune per-session counters older than this
+SESSION_TITLE_DEFAULT = 1          # auto-title untitled sessions (env LEDGER_SESSION_TITLE)
+TMUX_RELABEL_DEFAULT = 1           # label tmux once at start (env LEDGER_TMUX_RELABEL)
+TMUX_NAMED_OPTION = "@ledger_named"  # tmux user option marking a label as ours
+TMUX_TIMEOUT = 1.0                 # per tmux call; the hook must stay fast
 
 # Tool-name prefix as surfaced to sessions. Standalone MCP registration
 # yields mcp__ledger__*; installed as the cars plugin it becomes
@@ -162,12 +177,35 @@ def _plugin_version():
         return "unknown"
 
 
+def always_load_set():
+    """True when LEDGER_ALWAYS_LOAD already exempts the directory tools from
+    deferral (core or all), i.e. the eager-load question has been answered."""
+    return (os.environ.get("LEDGER_ALWAYS_LOAD") or "").strip().lower() in ("core", "all")
+
+
 def deferral_active():
     """Tool-schema deferral is Claude Code's default; only an explicit
     ENABLE_TOOL_SEARCH=false guarantees eager loading."""
     return os.environ.get("ENABLE_TOOL_SEARCH", "").strip().lower() != "false"
 
-REGISTER_NUDGE = (
+def register_nudge(title=""):
+    """The not-registered nudge. With a known session title it tells the
+    model the exact session_name to pass, so the directory entry matches the
+    address peers already see; without one it falls back to the transport
+    address, as before."""
+    if title:
+        naming = (
+            f" This session's title is '{title}'; pass session_name"
+            f" '{title}' so the entry matches the address peers see."
+        )
+    else:
+        naming = (
+            " Pass session_name only if you know this"
+            " session's real name (a rename notice in context counts; never guess or"
+            " derive one) — otherwise OMIT session_name and it registers under this"
+            " session's transport address automatically."
+        )
+    return (
     "[ledger] This session is NOT registered in the peer directory, so peers"
     " cannot discover it. Once this session's role/scope is clear (often"
     " from the user's first message): if a user is actively present in this"
@@ -176,16 +214,16 @@ REGISTER_NUDGE = (
     " the role and a trigger-phrased query_me_when ('message me when/before"
     f" ...'); on approval call {TOOL_PREFIX}register immediately, and never"
     " re-ask after a decline. If this session is running unattended,"
-    " register without asking. Pass session_name only if you know this"
-    " session's real name (a rename notice in context counts; never guess or"
-    " derive one) — otherwise OMIT session_name and it registers under this"
-    " session's transport address automatically. If you learn the real name"
+    " register without asking." + naming + " If you learn the real name"
     " later, re-register under it (the old entry is superseded). Keep the"
     f" entry current with {TOOL_PREFIX}update_registration as focus shifts."
     " If ledger tools appear name-only (schemas deferred), load them via"
     " ToolSearch by exact name first; manual fallback: the /cars:register"
     " skill."
-)
+    )
+
+
+REGISTER_NUDGE = register_nudge()
 
 AGENT_COLUMNS = [
     "session_name", "session_id", "pid", "cwd", "project", "role",
@@ -1252,14 +1290,44 @@ def read_hook_input():
         return {}
 
 
+def resolve_title(hook):
+    """What this session's title is, or should be: (title, source).
+
+    session_title on hook stdin is authoritative (Claude Code sends it when
+    a custom title exists). CLAUDE_LEDGER_NAME comes next so a session
+    launched with --name and the env var (launch-session.sh, seat) gets its
+    own name back rather than a derived one, even on a build that omits the
+    stdin field. Otherwise derive <project>-<sid[:4]>: readable, and unique
+    across sessions in the same checkout."""
+    title = (hook.get("session_title") or "").strip()
+    if title:
+        return title, "session_title"
+    env_name = os.environ.get("CLAUDE_LEDGER_NAME", "").strip()
+    if env_name:
+        return env_name, "env"
+    cwd = hook.get("cwd") or os.getcwd()
+    sid = hook.get("session_id") or ""
+    return f"{infer_project(cwd)}-{sid[:4]}", "derived"
+
+
+def session_title_enabled():
+    return _env_int("LEDGER_SESSION_TITLE", SESSION_TITLE_DEFAULT) > 0
+
+
 def resolve_name(hook):
-    """Name resolution priority: env var, session_title from hook stdin, derived."""
+    """Name resolution priority: env var, session_title from hook stdin, the
+    title hook-session-start would set (when enabled), transport address,
+    legacy derived name."""
     env_name = os.environ.get("CLAUDE_LEDGER_NAME", "").strip()
     if env_name:
         return env_name, "env"
     title = (hook.get("session_title") or "").strip()
     if title:
         return title, "session_title"
+    if session_title_enabled():
+        # Same string hook-session-start gives the session, so the row and
+        # the address peers see agree by construction.
+        return resolve_title(hook)
     addr = self_address()
     if addr:
         return addr, "uds"
@@ -1286,21 +1354,142 @@ def hook_register():
     call_tool("register", args)
 
 
-def hook_deregister():
-    """SessionEnd hook: remove this session's own row, found the same way
-    heartbeats find it. No-op if the session never registered."""
+def _title_state_path(sid):
+    sid = (sid or "unknown").replace(os.sep, "_")
+    return os.path.join(_roster_state_dir(), sid + ".title")
+
+
+def _read_title_state(sid):
+    """The title hook-session-start recorded for this session, or ''. Touches
+    the file so the roster-state prune does not drop it under a long
+    session."""
+    path = _title_state_path(sid)
+    try:
+        with open(path) as f:
+            title = f.read().strip()
+        os.utime(path, None)
+        return title
+    except OSError:
+        return ""
+
+
+def _tmux_label(title):
+    """Label this session's tmux window (or pane, LEDGER_TMUX_MODE=pane) with
+    the title, once. "Once" means: only if nobody has named it yet, or the
+    current name is one we set (marked by the @ledger_named user option), so a
+    hand-named window is never touched while /clear keeps our label in step.
+    No-op outside tmux. Every tmux call is bounded by TMUX_TIMEOUT."""
+    pane = os.environ.get("TMUX_PANE", "")
+    if not os.environ.get("TMUX") or not pane:
+        return
+    import shutil
+    import subprocess
+    tmux = shutil.which("tmux") or "/usr/bin/tmux"
+    if not os.access(tmux, os.X_OK):
+        return
+
+    class _Hung(Exception):
+        pass
+
+    def run(*args):
+        try:
+            r = subprocess.run([tmux, *args], capture_output=True, text=True,
+                               timeout=TMUX_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise _Hung()     # one hung call is enough: stop, do not stack timeouts
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+    try:
+        _tmux_label_calls(run, title)
+    except _Hung:
+        return
+
+
+def _tmux_label_calls(run, title):
+    pane = os.environ.get("TMUX_PANE", "")
+    if os.environ.get("LEDGER_TMUX_MODE", "window").strip().lower() == "pane":
+        ours = run("show-option", "-pqv", "-t", pane, TMUX_NAMED_OPTION)
+        current = run("display-message", "-p", "-t", pane, "#{pane_title}")
+        unnamed = current in ("", socket.gethostname())
+        if not (unnamed or ours):
+            return
+        run("select-pane", "-t", pane, "-T", title)
+        run("set-option", "-p", "-t", pane, TMUX_NAMED_OPTION, title)
+    else:
+        ours = run("show-option", "-wqv", "-t", pane, TMUX_NAMED_OPTION)
+        auto = run("show-option", "-wqv", "-t", pane, "automatic-rename")
+        unnamed = auto != "off"   # "" = inherited default = still automatic
+        if not (unnamed or ours):
+            return
+        run("rename-window", "-t", pane, title)
+        run("set-option", "-w", "-t", pane, "automatic-rename", "off")
+        run("set-option", "-w", "-t", pane, TMUX_NAMED_OPTION, title)
+
+
+def hook_session_start():
+    """SessionStart hook: give an untitled session the title
+    <project>-<sid[:4]> (LEDGER_SESSION_TITLE), record the title for the
+    roster nudge, and label the tmux window/pane with it once
+    (LEDGER_TMUX_RELABEL). Never registers: that is the user's call (or the
+    unwired session-start-register hook's)."""
     hook = read_hook_input()
-    own = find_own_row(hook)
+    title, source = resolve_title(hook)
+    titled = source == "session_title"
+    out = None
+    if not titled and session_title_enabled():
+        titled = True
+        out = {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                      "sessionTitle": title}}
+    if titled:
+        try:
+            os.makedirs(_roster_state_dir(), exist_ok=True)
+            with open(_title_state_path(hook.get("session_id")), "w") as f:
+                f.write(title)
+        except OSError:
+            pass
+        if _env_int("LEDGER_TMUX_RELABEL", TMUX_RELABEL_DEFAULT) > 0:
+            try:
+                _tmux_label(title)
+            except Exception:
+                pass
+    if out:
+        print(json.dumps(out))
+
+
+def hook_deregister():
+    """SessionEnd hook: remove this session's own row. No-op if the session
+    never registered.
+
+    Matched strictly: session_id, transport address or resolved name, never
+    a shared cwd. A cwd match is a guess about which row is ours, and acting
+    on a guess here deletes a live peer (issue #23: an unregistered session
+    exiting in the same directory as a registered one removed its row). The
+    register path refuses the cwd fallback for the same reason."""
+    hook = read_hook_input()
+    own = find_own_row(hook, strict=True)
     if own is not None:
         call_tool("deregister", {"session_name": own["session_name"]})
 
 
-def find_own_row(hook):
+def _is_foreign(row, sid):
+    """A row that carries a session_id other than ours is another session's,
+    however else it matches."""
+    return bool(sid and row["session_id"] and row["session_id"] != sid)
+
+
+def find_own_row(hook, strict=False):
     """Best-effort match of this session to its ledger row.
 
-    A manually /register-ed session may use a name unrelated to the derived
-    one and carry no session_id, so match by session_id first, then by unique
-    cwd (session-per-worktree makes cwd a good key), then by resolved name.
+    Order: session_id, then this session's transport address, then a unique
+    cwd, then the resolved name. When the hook knows our session_id, every
+    fallback skips rows that carry a different one, so a peer sharing our
+    directory is never taken for us.
+
+    The cwd step exists for a manually /register-ed row that has no
+    session_id yet (the first heartbeat backfills it). It is a guess, so
+    strict=True drops it; callers that delete pass strict.
     Returns the record dict or None.
     """
     sid = hook.get("session_id") or ""
@@ -1309,6 +1498,13 @@ def find_own_row(hook):
         conn = connect()
     except Exception:
         return None
+
+    def by_name(name):
+        row = conn.execute(
+            "SELECT * FROM agents WHERE session_name = ?", (name,)
+        ).fetchone()
+        return row_to_record(row) if row and not _is_foreign(row, sid) else None
+
     try:
         if sid:
             row = conn.execute(
@@ -1316,23 +1512,19 @@ def find_own_row(hook):
             ).fetchone()
             if row:
                 return row_to_record(row)
-        rows = conn.execute(
-            "SELECT * FROM agents WHERE cwd = ?", (cwd,)
-        ).fetchall()
-        if len(rows) == 1:
-            return row_to_record(rows[0])
         addr = self_address()
         if addr:
-            row = conn.execute(
-                "SELECT * FROM agents WHERE session_name = ?", (addr,)
-            ).fetchone()
-            if row:
-                return row_to_record(row)
+            rec = by_name(addr)
+            if rec:
+                return rec
+        if not strict:
+            rows = [r for r in conn.execute(
+                "SELECT * FROM agents WHERE cwd = ?", (cwd,)
+            ).fetchall() if not _is_foreign(r, sid)]
+            if len(rows) == 1:
+                return row_to_record(rows[0])
         name, _ = resolve_name(hook)
-        row = conn.execute(
-            "SELECT * FROM agents WHERE session_name = ?", (name,)
-        ).fetchone()
-        return row_to_record(row) if row else None
+        return by_name(name)
     finally:
         conn.close()
 
@@ -1729,8 +1921,14 @@ def hook_roster():
     )
     parts = [p for p in (roster,) if p]
     if own is None:
-        parts.append(REGISTER_NUDGE)
-    if deferral_active() and not state.get("fl"):
+        title = ((hook.get("session_title") or "").strip()
+                 or _read_title_state(hook.get("session_id")))
+        parts.append(register_nudge(title))
+    # The ask is only worth making when the answer is not already in place:
+    # with LEDGER_ALWAYS_LOAD set the directory tools arrive loaded, and the
+    # note would be asking the user to set a variable they have set.
+    if (deferral_active() and not always_load_set()
+            and not state.get("fl")):
         parts.append(FORCELOAD_NOTE)
         state["fl"] = True
         with open(state_path, "w") as f:
@@ -1817,6 +2015,11 @@ def main():
             hook_register()
         except Exception:
             pass  # registration failure must never disturb session start
+    elif cmd == "hook-session-start":
+        try:
+            hook_session_start()
+        except Exception:
+            pass  # a title is a nicety; never disturb session start
     elif cmd == "hook-deregister":
         try:
             hook_deregister()

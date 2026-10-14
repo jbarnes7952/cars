@@ -4,6 +4,7 @@
 import glob
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -675,32 +676,96 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(json.loads(ev[0]["payload"])["reason"],
                          "transport-socket-gone")
 
-    def test_hook_deregister_matches_own_row_by_cwd(self):
-        os.environ.pop("CLAUDE_LEDGER_NAME", None)
-        cwd = os.path.join(self.tmp.name, "own-cwd")
+    def _own_row_hook(self, verb, sid, cwd, extra_env=None):
+        """Run an own-row hook as a session with no transport address, so
+        only session_id, cwd and name can match."""
+        nosocks = os.path.join(self.tmp.name, "nosocks-own")
+        os.makedirs(nosocks, exist_ok=True)
+        env = dict(os.environ, LEDGER_SOCK_DIR=nosocks, **(extra_env or {}))
+        env.pop("CLAUDE_LEDGER_NAME", None)
+        proc = subprocess.run(
+            [sys.executable, SERVER, verb],
+            input=json.dumps({"session_id": sid, "cwd": cwd}),
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc
+
+    def _shared_dir(self, name):
+        cwd = os.path.join(self.tmp.name, name)
         os.makedirs(cwd)
-        nosocks = os.path.join(self.tmp.name, "nosocks3")
-        os.makedirs(nosocks)
+        return cwd
+
+    def test_hook_deregister_never_deletes_on_a_cwd_match(self):
+        """SessionEnd deletes, so it must not guess. A row with no
+        session_id in our cwd may be ours or a peer's; leave it alone."""
+        os.environ.pop("CLAUDE_LEDGER_NAME", None)
+        cwd = self._shared_dir("own-cwd")
         self.call("register", session_name="custom-name", cwd=cwd)
-        proc = subprocess.run(
-            [sys.executable, SERVER, "hook-deregister"],
-            input=json.dumps({"session_id": "unknown-sid", "cwd": cwd}),
-            capture_output=True, text=True,
-            env=dict(os.environ, LEDGER_SOCK_DIR=nosocks),
-        )
-        self.assertEqual(proc.returncode, 0)
+        self._own_row_hook("hook-deregister", "unknown-sid", cwd)
+        self.assertEqual(self.call("list_agents_detailed")["count"], 1)
+        self.assertEqual(self.events(event="deregister"), [])
+
+    def test_hook_deregister_removes_a_manual_row_once_backfilled(self):
+        """The real path for a manual registration: the first heartbeat
+        matches by cwd and backfills session_id, and SessionEnd then
+        deletes by session_id."""
+        cwd = self._shared_dir("manual-cwd")
+        self.call("register", session_name="custom-name", cwd=cwd)
+        self._own_row_hook("hook-heartbeat", "my-sid", cwd)
+        self._own_row_hook("hook-deregister", "my-sid", cwd)
         self.assertEqual(self.call("list_agents_detailed")["count"], 0)
-        # and an unregistered session's SessionEnd is a clean no-op
-        proc = subprocess.run(
-            [sys.executable, SERVER, "hook-deregister"],
-            input=json.dumps({"session_id": "ghost", "cwd": nosocks}),
-            capture_output=True, text=True,
-            env=dict(os.environ, LEDGER_SOCK_DIR=nosocks),
-        )
-        self.assertEqual(proc.returncode, 0)
-        self.assertEqual(len(self.events(event="deregister")), 1)
+
+    def test_hook_deregister_by_session_id(self):
+        cwd = self._shared_dir("sid-cwd")
+        self.call("register", session_name="mine", session_id="my-sid",
+                  cwd=cwd)
+        self._own_row_hook("hook-deregister", "my-sid", "/elsewhere")
+        self.assertEqual(self.call("list_agents_detailed")["count"], 0)
+
+    def test_unregistered_exit_spares_a_peer_in_the_same_cwd(self):
+        """Issue #23 as it happened: a registered peer (a commlink-registered
+        Codex session) and an unregistered Claude session share a directory;
+        the Claude session exits. The peer's row must survive."""
+        cwd = self._shared_dir("cupboard")
+        self.call("register", session_name="codex-peer",
+                  session_id="codex-sid", cwd=cwd, name_source="commlink")
+        self._own_row_hook("hook-deregister", "claude-sid", cwd)
+        names = [a["session_name"]
+                 for a in self.call("list_agents_detailed")["agents"]]
+        self.assertEqual(names, ["codex-peer"])
+        self.assertEqual(self.events(event="deregister"), [])
+        # and an unregistered session alone in its directory is a no-op
+        self._own_row_hook("hook-deregister", "ghost",
+                           self._shared_dir("empty"))
+        self.assertEqual(self.events(event="deregister"), [])
+
+    def test_unregistered_heartbeat_does_not_keep_a_peer_alive(self):
+        cwd = self._shared_dir("hb-shared")
+        self.call("register", session_name="peer", session_id="peer-sid",
+                  cwd=cwd)
+        self._own_row_hook("hook-heartbeat", "other-sid", cwd,
+                           {"LEDGER_HEARTBEAT_EVERY": "0"})
+        self.assertEqual(self.events(event="heartbeat", session_name="peer"),
+                         [])
+        rec = self.call("list_agents_detailed")["agents"][0]
+        self.assertEqual(rec["session_id"], "peer-sid")
+
+    def test_unregistered_roster_shows_the_peer_and_nudges(self):
+        """The roster must not mistake a same-cwd peer for us: it lists the
+        peer and still asks this session to register."""
+        cwd = self._shared_dir("roster-shared")
+        self.call("register", session_name="peer", session_id="peer-sid",
+                  cwd=cwd, role="the peer")
+        proc = self._own_row_hook("hook-roster", "other-sid", cwd,
+                                  {"LEDGER_ROSTER_EVERY": "1"})
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("- peer", ctx)
+        self.assertIn("NOT registered", ctx)
 
     def test_hook_register_uds_fallback(self):
+        """With auto-titling off, a nameless hook registration keys by the
+        transport address, as it always did."""
         os.environ.pop("CLAUDE_LEDGER_NAME", None)
         sockdir = os.path.join(self.tmp.name, "socks-hook")
         os.makedirs(sockdir)
@@ -710,7 +775,8 @@ class LedgerTest(unittest.TestCase):
             [sys.executable, SERVER, "hook-register"],
             input=json.dumps({"session_id": "sid-uds", "cwd": self.tmp.name}),
             capture_output=True, text=True,
-            env=dict(os.environ, LEDGER_SOCK_DIR=sockdir),
+            env=dict(os.environ, LEDGER_SOCK_DIR=sockdir,
+                     LEDGER_SESSION_TITLE="0"),
         )
         self.assertEqual(proc.returncode, 0)
         rec = self.call("list_agents_detailed")["agents"][0]
@@ -1561,6 +1627,7 @@ class LedgerTest(unittest.TestCase):
         self.call("register", session_name="peer-1", session_id="other")
         env = dict(os.environ, LEDGER_ROSTER_EVERY="1")
         env.pop("ENABLE_TOOL_SEARCH", None)  # unset => deferral assumed
+        env.pop("LEDGER_ALWAYS_LOAD", None)  # unanswered => ask
         def run(extra=None):
             e = dict(env, **(extra or {}))
             proc = subprocess.run(
@@ -1578,6 +1645,31 @@ class LedgerTest(unittest.TestCase):
                                 "LEDGER_ROSTER_EVERY": "1"}))[
             "hookSpecificOutput"]["additionalContext"]
         self.assertNotIn("schemas may be deferred", eager)
+
+    def test_roster_forceload_ask_is_silent_once_answered(self):
+        """LEDGER_ALWAYS_LOAD=core|all is the answer the ask is after; with
+        it set, asking again every session is noise. The deferral header
+        stays, since peer ask_* tools are still deferred under core."""
+        self.call("register", session_name="peer-1", session_id="other")
+        for mode in ("core", "all", "CORE"):
+            env = dict(os.environ, LEDGER_ROSTER_EVERY="1",
+                       LEDGER_ALWAYS_LOAD=mode)
+            env.pop("ENABLE_TOOL_SEARCH", None)
+            proc = subprocess.run(
+                [sys.executable, SERVER, "hook-roster"],
+                input=json.dumps({"session_id": "sess-" + mode, "cwd": "/nope"}),
+                capture_output=True, text=True, env=env)
+            ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertNotIn("LEDGER_ALWAYS_LOAD", ctx, mode)
+            self.assertIn("schemas may be deferred", ctx, mode)
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="1", LEDGER_ALWAYS_LOAD="none")
+        env.pop("ENABLE_TOOL_SEARCH", None)
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": "sess-none", "cwd": "/nope"}),
+            capture_output=True, text=True, env=env)
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("LEDGER_ALWAYS_LOAD", ctx, "none is not an answer")
 
     def test_watcher_notifies_on_external_registration(self):
         import threading
@@ -1650,6 +1742,275 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(found["agents"][0]["session_name"], "stdio-agent")
         self.assertTrue(responses[5]["result"]["isError"])
         self.assertEqual(responses[6]["error"]["code"], -32601)
+
+
+    # ------------------------------------------------- session title + tmux
+
+    def _tmux_shim(self, auto="on", ours="", pane_title="", sleep=""):
+        """A fake tmux on PATH: logs every argv line to $TMUX_SHIM_LOG and
+        answers the three queries the hook makes from env. Never a real tmux."""
+        shim_dir = os.path.join(self.tmp.name, "shim")
+        os.makedirs(shim_dir, exist_ok=True)
+        log = os.path.join(self.tmp.name, "tmux.log")
+        if os.path.exists(log):
+            os.unlink(log)
+        with open(os.path.join(shim_dir, "tmux"), "w") as f:
+            f.write("#!/bin/sh\n"
+                    'echo "$*" >> "$TMUX_SHIM_LOG"\n'
+                    f"{sleep}\n"
+                    'case "$*" in\n'
+                    '  *automatic-rename) echo "$TMUX_SHIM_AUTO" ;;\n'
+                    '  show-option*@ledger_named) echo "$TMUX_SHIM_OURS" ;;\n'
+                    '  display-message*) echo "$TMUX_SHIM_PANE_TITLE" ;;\n'
+                    "esac\n")
+        os.chmod(os.path.join(shim_dir, "tmux"), 0o755)
+        env = dict(os.environ, PATH=shim_dir + os.pathsep + os.environ["PATH"],
+                   TMUX="/tmp/tmux-fake/default,1,0", TMUX_PANE="%9",
+                   TMUX_SHIM_LOG=log, TMUX_SHIM_AUTO=auto, TMUX_SHIM_OURS=ours,
+                   TMUX_SHIM_PANE_TITLE=pane_title)
+        env.pop("CLAUDE_LEDGER_NAME", None)
+        return env, log
+
+    def _start_hook(self, payload, env=None):
+        return subprocess.run(
+            [sys.executable, SERVER, "hook-session-start"],
+            input=payload if isinstance(payload, str) else json.dumps(payload),
+            capture_output=True, text=True, env=env or os.environ.copy())
+
+    def _title_file(self, sid):
+        return os.path.join(os.path.dirname(self.db), "roster-state", sid + ".title")
+
+    def _log(self, log):
+        try:
+            with open(log) as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def test_session_start_titles_an_untitled_session(self):
+        cwd = os.path.join(self.tmp.name, "myproj")
+        os.makedirs(cwd)
+        env = os.environ.copy()
+        env.pop("CLAUDE_LEDGER_NAME", None)
+        proc = self._start_hook({"session_id": "abcd1234-x", "cwd": cwd,
+                                 "hook_event_name": "SessionStart"}, env)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(json.loads(proc.stdout), {"hookSpecificOutput": {
+            "hookEventName": "SessionStart", "sessionTitle": "myproj-abcd"}})
+        with open(self._title_file("abcd1234-x")) as f:
+            self.assertEqual(f.read(), "myproj-abcd")
+
+    def test_session_start_uses_git_root_for_project(self):
+        repo = os.path.join(self.tmp.name, "repo")
+        os.makedirs(os.path.join(repo, ".git"))
+        sub = os.path.join(repo, "sub")
+        os.makedirs(sub)
+        env = os.environ.copy()
+        env.pop("CLAUDE_LEDGER_NAME", None)
+        proc = self._start_hook({"session_id": "abcd1234-x", "cwd": sub}, env)
+        title = json.loads(proc.stdout)["hookSpecificOutput"]["sessionTitle"]
+        self.assertEqual(title, "repo-abcd")
+
+    def test_session_start_keeps_an_existing_title(self):
+        proc = self._start_hook({"session_id": "s1", "cwd": self.tmp.name,
+                                 "session_title": "cars-maint"})
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+        with open(self._title_file("s1")) as f:
+            self.assertEqual(f.read(), "cars-maint")
+
+    def test_session_start_prefers_env_name_over_derived(self):
+        env = dict(os.environ, CLAUDE_LEDGER_NAME="seat-child")
+        proc = self._start_hook({"session_id": "s2", "cwd": self.tmp.name}, env)
+        title = json.loads(proc.stdout)["hookSpecificOutput"]["sessionTitle"]
+        self.assertEqual(title, "seat-child")
+
+    def test_session_start_toggle_off_emits_nothing(self):
+        env, log = self._tmux_shim()
+        env["LEDGER_SESSION_TITLE"] = "0"
+        proc = self._start_hook({"session_id": "s3", "cwd": self.tmp.name}, env)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+        self.assertFalse(os.path.exists(self._title_file("s3")))
+        self.assertEqual(self._log(log), "", "no title => nothing to label")
+
+    def test_session_start_survives_bad_input(self):
+        proc = self._start_hook("not json")
+        self.assertEqual(proc.returncode, 0)
+
+    def test_session_start_never_registers(self):
+        self._start_hook({"session_id": "s4", "cwd": self.tmp.name})
+        self.assertEqual(self.call("list_agents_detailed")["count"], 0)
+        self.assertEqual(self.events(event="register"), [])
+
+    def test_tmux_window_labelled_when_automatic_rename_on(self):
+        env, log = self._tmux_shim(auto="on")
+        cwd = os.path.join(self.tmp.name, "myproj")
+        os.makedirs(cwd)
+        self._start_hook({"session_id": "abcd-1", "cwd": cwd}, env)
+        out = self._log(log)
+        self.assertIn("rename-window -t %9 myproj-abcd", out)
+        self.assertIn("set-option -w -t %9 automatic-rename off", out)
+        self.assertIn("set-option -w -t %9 @ledger_named myproj-abcd", out)
+
+    def test_tmux_window_left_alone_when_user_named_it(self):
+        env, log = self._tmux_shim(auto="off", ours="")
+        self._start_hook({"session_id": "abcd-2", "cwd": self.tmp.name}, env)
+        self.assertNotIn("rename-window", self._log(log))
+
+    def test_tmux_window_relabelled_when_name_is_ours(self):
+        """/clear: new session id, new title, and the old label was ours."""
+        env, log = self._tmux_shim(auto="off", ours="myproj-zzzz")
+        self._start_hook({"session_id": "abcd-3", "cwd": self.tmp.name}, env)
+        self.assertIn("rename-window", self._log(log))
+
+    def test_tmux_pane_mode_uses_select_pane(self):
+        import socket as _socket
+        env, log = self._tmux_shim(pane_title=_socket.gethostname())
+        env["LEDGER_TMUX_MODE"] = "pane"
+        cwd = os.path.join(self.tmp.name, "myproj")
+        os.makedirs(cwd)
+        self._start_hook({"session_id": "abcd-4", "cwd": cwd}, env)
+        out = self._log(log)
+        self.assertIn("select-pane -t %9 -T myproj-abcd", out)
+        self.assertIn("set-option -p -t %9 @ledger_named myproj-abcd", out)
+        self.assertNotIn("rename-window", out)
+        env, log = self._tmux_shim(pane_title="custom", ours="")
+        env["LEDGER_TMUX_MODE"] = "pane"
+        self._start_hook({"session_id": "abcd-5", "cwd": cwd}, env)
+        self.assertNotIn("select-pane", self._log(log))
+
+    def test_tmux_noop_outside_tmux_or_when_disabled(self):
+        env, log = self._tmux_shim()
+        env.pop("TMUX")
+        self._start_hook({"session_id": "abcd-6", "cwd": self.tmp.name}, env)
+        self.assertEqual(self._log(log), "")
+        env, log = self._tmux_shim()
+        env["LEDGER_TMUX_RELABEL"] = "0"
+        proc = self._start_hook({"session_id": "abcd-7", "cwd": self.tmp.name}, env)
+        self.assertEqual(self._log(log), "")
+        self.assertIn("sessionTitle", proc.stdout, "titling is independent")
+
+    def test_tmux_hang_does_not_block_the_hook(self):
+        import time
+        env, log = self._tmux_shim(sleep="sleep 3")
+        t0 = time.time()
+        proc = self._start_hook({"session_id": "abcd-8", "cwd": self.tmp.name}, env)
+        self.assertEqual(proc.returncode, 0)
+        self.assertLess(time.time() - t0, 2.9)
+        self.assertIn("sessionTitle", proc.stdout, "the title still lands")
+
+    def test_session_start_wrapper_passes_hook_json_through(self):
+        script = os.path.join(os.path.dirname(SERVER), "hooks",
+                              "session-start-title.sh")
+        cwd = os.path.join(self.tmp.name, "myproj")
+        os.makedirs(cwd)
+        payload = json.dumps({"session_id": "abcd-9", "cwd": cwd})
+        env = os.environ.copy()
+        env.pop("CLAUDE_LEDGER_NAME", None)
+        env.pop("TMUX", None)
+        proc = subprocess.run(
+            ["bash", "-c", f'printf %s {json.dumps(payload)} | {script}'],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(
+            json.loads(proc.stdout)["hookSpecificOutput"]["sessionTitle"],
+            "myproj-abcd")
+
+    def test_roster_nudge_names_the_session_title(self):
+        self.call("register", session_name="peer-t", session_id="other")
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="1")
+        state_dir = os.path.join(os.path.dirname(self.db), "roster-state")
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, "sess-t.title"), "w") as f:
+            f.write("myproj-abcd")
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": "sess-t", "cwd": "/nope"}),
+            capture_output=True, text=True, env=env)
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("pass session_name 'myproj-abcd'", ctx)
+        self.assertNotIn("OMIT session_name", ctx)
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": "sess-u", "cwd": "/nope"}),
+            capture_output=True, text=True, env=env)
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("OMIT session_name", ctx, "no title known => old wording")
+
+    def test_roster_nudge_prefers_stdin_session_title(self):
+        self.call("register", session_name="peer-v", session_id="other")
+        env = dict(os.environ, LEDGER_ROSTER_EVERY="1")
+        state_dir = os.path.join(os.path.dirname(self.db), "roster-state")
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, "sess-v.title"), "w") as f:
+            f.write("file-name")
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-roster"],
+            input=json.dumps({"session_id": "sess-v", "cwd": "/nope",
+                              "session_title": "stdin-name"}),
+            capture_output=True, text=True, env=env)
+        ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("pass session_name 'stdin-name'", ctx)
+
+    def test_hook_register_keys_by_the_auto_title(self):
+        """With auto-titling on (the default), the auto-register hook keys
+        the row by the title the session got, even when a socket exists."""
+        os.environ.pop("CLAUDE_LEDGER_NAME", None)
+        sockdir = os.path.join(self.tmp.name, "socks-hook")
+        os.makedirs(sockdir)
+        open(os.path.join(sockdir, f"{os.getpid()}.sock"), "w").close()
+        cwd = os.path.join(self.tmp.name, "myproj")
+        os.makedirs(cwd)
+        proc = subprocess.run(
+            [sys.executable, SERVER, "hook-register"],
+            input=json.dumps({"session_id": "abcd-sid", "cwd": cwd}),
+            capture_output=True, text=True,
+            env=dict(os.environ, LEDGER_SOCK_DIR=sockdir),
+        )
+        self.assertEqual(proc.returncode, 0)
+        rec = self.call("list_agents_detailed")["agents"][0]
+        self.assertEqual(rec["session_name"], "myproj-abcd")
+
+    def test_tmux_relabel_hook_is_retired(self):
+        hooks_dir = os.path.join(HERE, "hooks")
+        self.assertFalse(os.path.exists(os.path.join(hooks_dir, "tmux-relabel.sh")))
+        with open(os.path.join(hooks_dir, "hooks.json")) as f:
+            wiring = f.read()
+        self.assertNotIn("tmux-relabel", wiring)
+        self.assertIn("SessionStart", json.loads(wiring)["hooks"])
+        with open(os.path.join(HERE, "examples", "settings.json")) as f:
+            example = f.read()
+        self.assertNotIn("tmux-relabel", example)
+        self.assertIn("session-start-title.sh", example)
+
+
+class NoPersonalPathsTest(unittest.TestCase):
+    """The repo is public and installed on other machines: no tracked file
+    may name a user's home directory. Placeholders such as /path/to/cars and
+    ~/tools/cars are fine; a real /home/<user> or /Users/<user> is not."""
+
+    # Built so this file's own source does not match it.
+    PERSONAL_PATH = re.compile(r"/(?:home|Users)/(?!<)[A-Za-z0-9._-]+")
+
+    def test_no_tracked_file_names_a_home_directory(self):
+        root = os.path.dirname(os.path.abspath(__file__))
+        try:
+            files = subprocess.run(
+                ["git", "-C", root, "ls-files", "-z"], capture_output=True,
+                text=True, check=True, timeout=10).stdout.split("\0")
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("not a git checkout")
+        hits = []
+        for rel in filter(None, files):
+            try:
+                with open(os.path.join(root, rel), encoding="utf-8") as f:
+                    for n, line in enumerate(f, 1):
+                        if self.PERSONAL_PATH.search(line):
+                            hits.append(f"{rel}:{n}: {line.strip()[:80]}")
+            except (OSError, UnicodeDecodeError):
+                continue
+        self.assertEqual(hits, [], "personal paths in tracked files")
 
 
 if __name__ == "__main__":

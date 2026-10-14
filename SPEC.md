@@ -17,7 +17,7 @@ An MCP server that acts as a discovery directory ("DNS") for dynamic Claude Code
 3. Hook scripts:
    - `hooks/session-start-register.sh` (SessionStart) — registers the session.
    - `hooks/session-end-deregister.sh` (SessionEnd) — deregisters.
-   - `hooks/tmux-relabel.sh` (PostToolUse, matcher on the ledger's update tool) — relabels the tmux window/pane from the registered project.
+   - `hooks/session-start-title.sh` (SessionStart) — sets the session title when none exists and labels the tmux window/pane with it once. Never registers.
 4. `claude-md-snippet.md` — a block to paste into project/user CLAUDE.md instructing Claude how to participate in the registry (see Protocol section).
 5. Example `settings.json` hook wiring and example `.mcp.json` / `claude mcp add` registration.
 6. `launch-session.sh` — wrapper script that mints a session name, exports it, and launches `claude --name <name>`.
@@ -35,7 +35,7 @@ SQLite database at `~/.claude-ledger/ledger.db`. WAL mode. Two tables:
 | session_id | TEXT | Claude Code session UUID, for self-heal/audit |
 | pid | INTEGER NULL | process id if known |
 | cwd | TEXT | working directory at registration |
-| project | TEXT NULL | inferred project name (drives tmux label) |
+| project | TEXT NULL | inferred project name (searchable; shown in the roster) |
 | role | TEXT | short role label, e.g. `schema-owner` |
 | capabilities | TEXT | JSON array of strings |
 | query_me_when | TEXT | free text: routing guidance for other agents |
@@ -235,20 +235,22 @@ Args: `session_name`. Delete row, write `deregister` event. Idempotent (deregist
 ### SessionStart → register
 Reads hook JSON from stdin (`session_id`, `cwd`). Determines the session name in this priority order:
 1. `$CLAUDE_LEDGER_NAME` env var (set by `launch-session.sh`).
-2. `session_title` field from hook stdin, if present and non-empty. **Verify empirically during implementation whether `session_title` reflects `--name`; if it does not, document that and rely on (1) and (3).**
-3. Fallback: derive `basename(cwd)-<first 4 chars of session_id>` and register that, flagging the record with `"name_source": "derived"` in the register event payload — a derived name may not match the ListAgents name, so the CLAUDE.md protocol (below) instructs Claude to correct it on first turn.
+2. `session_title` field from hook stdin, if present and non-empty (Claude Code sends it when a custom title exists — `--name`, `/rename`, or a hook's `sessionTitle` output).
+3. With `LEDGER_SESSION_TITLE` on (default): the title the SessionStart title hook gives an untitled session, `<project>-<first 4 chars of session_id>`, flagged `"name_source": "derived"`. The row and the title then agree by construction.
+4. The transport address, `uds:<socket>`.
+5. Fallback: derive `basename(cwd)-<first 4 chars of session_id>` and register that, flagged `"name_source": "derived"` — a derived name may not match the ListAgents name, so the CLAUDE.md protocol (below) instructs Claude to correct it on first turn.
 
 Registers with `role: "unassigned"`, `status: "starting"`, `project` inferred as `basename` of the git repo root if `cwd` is inside a git repo, else `basename(cwd)`. Captures `$TMUX_PANE` if set. Must exit 0 fast (<200ms) and exit 0 even if the ledger is unreachable — registration failure is never allowed to disturb session start.
 
 ### SessionEnd → deregister
-Calls `deregister` with the same name resolution. Exit 0 unconditionally.
+Deletes this session's own row, matched strictly: by `session_id`, then this session's transport address, then the resolved name. Never by `cwd`: a shared directory is a guess, and acting on it deletes a peer. When the hook knows its `session_id`, a row carrying a different one is never treated as its own, by this hook or by heartbeat, peer-message or roster matching. Exit 0 unconditionally.
 
-### PostToolUse (matcher: the ledger `update_registration` and `register` tool names, i.e. `mcp__ledger__register|mcp__ledger__update_registration`) → tmux relabel
-- No-op unless `$TMUX` is set.
-- Parse `project` from `tool_input` on stdin; if absent, no-op.
-- `tmux rename-window -t "$TMUX_PANE" "<project>"` and `tmux set-option -w -t "$TMUX_PANE" automatic-rename off`.
-- If multiple panes per window is detected as the user's layout (leave a config flag `LEDGER_TMUX_MODE=window|pane`, default `window`), `pane` mode uses `tmux select-pane -t "$TMUX_PANE" -T "<project>"` instead.
-- Exit 0 unconditionally.
+### SessionStart → session title + tmux label
+A sibling SessionStart hook that never registers. Two behaviours, each with its own switch:
+- `LEDGER_SESSION_TITLE` (default 1): if stdin carries no `session_title`, output `{"hookSpecificOutput": {"hookEventName": "SessionStart", "sessionTitle": "<project>-<session_id[:4]>"}}` (`CLAUDE_LEDGER_NAME`, when set, is used instead of deriving). An existing title is never overwritten. The title is recorded in `roster-state/<session_id>.title` so the register nudge can name the exact `session_name` to pass.
+- `LEDGER_TMUX_RELABEL` (default 1): label the tmux window with the title, once. "Once" = only if `automatic-rename` is still on, or the current name was set by this hook (tmux user option `@ledger_named`). `LEDGER_TMUX_MODE=window|pane` (default `window`): `window` = `rename-window` + `automatic-rename off`; `pane` = `select-pane -T`, where "unnamed" is a pane title that is empty or the hostname. A hand-named window/pane is never touched; `/clear` (new session id) keeps the label in step.
+- No-op unless `$TMUX` and `$TMUX_PANE` are set. Each tmux call bounded (1 s); the first hang aborts the labelling. Exit 0 unconditionally.
+- `project` does not drive the label; a changed `project` on `update_registration` leaves tmux alone.
 
 ## Launch wrapper
 
@@ -262,7 +264,7 @@ Calls `deregister` with the same name resolution. Exit 0 unconditionally.
 The snippet must instruct Claude to:
 1. On first turn, verify its registration: compare its own name (as it appears to peers) against the ledger record; if the SessionStart hook registered a derived name that doesn't match, call `register` with the correct name and `deregister` the derived one.
 2. Set a real `role`, `capabilities`, and `query_me_when` as soon as the session's purpose is clear (usually first user prompt).
-3. Call `update_registration` whenever focus meaningfully shifts (new project, new major task) — the tmux label updates as a side effect; never use `/rename`.
+3. Call `update_registration` whenever focus meaningfully shifts (new project, new major task); never use `/rename`. The tmux label is set once from the session title and does not follow `project`.
 4. Before messaging a peer about a topic, call `find_agents` first; address `SendMessage` using the returned `session_name`. If delivery fails or the entry is stale, fall back to native `ListAgents`.
 5. Never treat the ledger as a message channel — no "leave a note in the ledger" patterns.
 
@@ -278,7 +280,7 @@ The snippet must instruct Claude to:
 
 1. Launch two sessions via `launch-session.sh` in different repos; each appears in `list_agents_detailed` with correct name, cwd, project.
 2. In session A, ask Claude "who should I ask about <session B's domain>?" — Claude calls `find_agents`, gets B's `session_name`, and `SendMessage` to that name succeeds.
-3. Update B's registration with a new `project` — B's tmux window label changes within one turn; `events` table shows the update.
+3. Update B's registration with a new `project` — `events` table shows the update; B's tmux window label is unchanged (it was set once from the session title at start).
 4. Kill session B without SessionEnd firing (kill -9 the process); after TTL, B is flagged stale, then evicted, with an `evicted` event.
 5. Stop the ledger MCP server entirely; sessions still start normally (hook exits 0) and native `ListAgents`/`SendMessage` still work.
 6. Re-launch B with the same name; `register` upserts cleanly, no duplicate rows.
