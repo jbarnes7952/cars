@@ -374,6 +374,38 @@ PRESENCE_GONE = "gone"        # looked, and it is not
 PRESENCE_UNKNOWN = "unknown"  # could not look
 
 
+def _pid_alive(pid):
+    """True if a process with this pid exists.
+
+    Signal 0 sends nothing; the kernel only checks that the pid exists and
+    that we may signal it. EPERM means it exists under another uid, so it is
+    alive. This replaces looking for /proc/<pid>, which does not exist on
+    macOS and made every pid there read as dead.
+
+    Like /proc, a zombie counts as alive and a reused pid is a false positive.
+
+    TODO(windows): not portable to Windows. There os.kill(pid, 0) does not
+    probe -- signal 0 is CTRL_C_EVENT, so it sends Ctrl-C to the target's
+    console group. Windows needs OpenProcess + GetExitCodeProcess (via
+    ctypes, to stay stdlib-only) before cars can run there.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False  # 0 and negatives address process groups, not a pid
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OverflowError:
+        return False
+    return True
+
+
 def _probe_socket(path, authoritative):
     """Ask a unix socket whether anything is listening.
 
@@ -392,6 +424,8 @@ def _probe_socket(path, authoritative):
         # socket connect() returns EAGAIN only when the listener's backlog is
         # full -- a backlog belongs to a listener, so this is evidence OF
         # life. Nothing listening gives ECONNREFUSED; no file gives ENOENT.
+        # That is Linux. macOS reports a full backlog as ECONNREFUSED, so
+        # there a listener too busy to accept reads as refused below.
         return PRESENCE_LIVE
     except (ConnectionRefusedError, FileNotFoundError):
         return PRESENCE_GONE if authoritative else PRESENCE_UNKNOWN
@@ -439,8 +473,7 @@ def presence(row, host=None):
         pid = None
     pid_says = None
     if pid:
-        pid_says = (PRESENCE_LIVE if os.path.exists(f"/proc/{int(pid)}")
-                    else PRESENCE_GONE)
+        pid_says = PRESENCE_LIVE if _pid_alive(pid) else PRESENCE_GONE
         if pid_says == PRESENCE_LIVE:
             return PRESENCE_LIVE
 
@@ -453,7 +486,7 @@ def presence(row, host=None):
     base = os.path.basename(path)
     pid = base[:-5] if base.endswith(".sock") else ""
     if pid.isdigit():
-        if os.path.exists(f"/proc/{pid}"):
+        if _pid_alive(pid):
             return PRESENCE_LIVE
         return PRESENCE_GONE if authoritative else PRESENCE_UNKNOWN
     # Not pid-shaped, so the filename tells us nothing. Ask the socket.

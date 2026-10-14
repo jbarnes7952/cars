@@ -4,6 +4,14 @@ One entry per tagged release. Versions match `.claude-plugin/plugin.json`
 and the `vX.Y.Z` git tag. Releases before 1.18.0 are untagged; see the git
 log for them.
 
+## 1.18.4
+
+- Presence checks a declared pid with `os.kill(pid, 0)` instead of looking
+  for `/proc/<pid>`. macOS has no procfs, so every pid there read as dead:
+  pid-only peers were never `live`, and running sessions' `<pid>.sock` rows
+  could be evicted. Linux behaviour is unchanged. Windows is still not
+  supported, since signal 0 there sends Ctrl-C. (#26)
+
 ## 1.18.3
 
 - The serve process's registry poll holds one read connection open instead
