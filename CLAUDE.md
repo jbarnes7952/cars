@@ -50,13 +50,23 @@ session — the name is its address.
 
 ## Releases
 
-This machine runs CARS as an installed plugin (`cars@cars`) from a
-**directory marketplace pointing at this checkout** — every session's
-`CLAUDE_PLUGIN_ROOT` is this checkout, and the cache copy that
-`claude plugin update` writes is never executed. So this working tree **is**
-the fleet: an uncommitted edit, or a checked-out branch, goes live to every
-session at its next server start. Keep the checkout on `main` and clean, and
-do session work in a worktree (see the global instructions).
+Where sessions run CARS from depends on how the plugin is installed, so
+check before assuming an edit here is live. `installed_plugins.json` under
+`~/.claude/plugins/` names the install (`cars@cars` or `cars@ark-project`),
+and its `installPath` is the code sessions actually run.
+
+- **`cars@cars`, a directory marketplace pointing at this checkout** (the
+  maintainer setup the ark-marketplace README recommends): every session's
+  `CLAUDE_PLUGIN_ROOT` is this checkout, so this working tree **is** the
+  fleet. An uncommitted edit, or a checked-out branch, goes live to every
+  session at its next server start. Keep the checkout on `main` and clean,
+  and do session work in a worktree (see the global instructions).
+- **`cars@ark-project`, the GitHub catalog `jbarnes7952/ark-marketplace`**:
+  sessions run a copy in `~/.claude/plugins/cache/ark-project/cars/<version>/`
+  at the commit the catalog pins (a release tag plus its sha). Nothing in
+  this checkout reaches them, merged or not, until that pin moves and the
+  plugin is updated. Each release gets its own cache directory, so an old
+  `serve` never sees its own file change.
 
 A running `serve` process keeps the code it loaded; `/reload-plugins` does
 not restart it. Compare `server_version` from `ledger_mcp.py list --json`
@@ -68,15 +78,21 @@ To release:
 2. Bump `version` in `.claude-plugin/plugin.json` AND
    `.claude-plugin/marketplace.json`, and add a `CHANGELOG.md` entry, in
    the same commit as the change.
-3. Merge to `main` and pull the checkout. Hooks and skills pick it up on
-   their next firing, a `serve` process on its next start.
-   `claude plugin update cars` only refreshes the install record.
+3. Merge to `main` and pull the checkout. Under `cars@cars`, hooks and
+   skills pick it up on their next firing and a `serve` process on its next
+   start; `claude plugin update cars` only refreshes the install record.
 4. Tag the squash commit on `main` and push the tag:
    `git tag -a vX.Y.Z <sha> -m "cars X.Y.Z: <summary>" && git push origin vX.Y.Z`.
    The tag matches the manifest version. Downstream catalogs (the
    `ark-project` marketplace) pin a tag plus sha, so an untagged release
    cannot be pinned cleanly. Tags start at v1.18.0; earlier releases are
    untagged.
+5. To ship it to `cars@ark-project` installs, repin the `cars` entry in
+   `jbarnes7952/ark-marketplace` (`version`, `ref`, `sha`; see that repo's
+   README, which also repins `fleet.json` in ark), then on each machine
+   `claude plugin marketplace update ark-project` and
+   `claude plugin update cars@ark-project`. A `serve` process still runs
+   its old copy until its session restarts.
 
 To try work before merging, `claude --plugin-dir <worktree>` in a scratch
 session runs that worktree instead of the checkout.
