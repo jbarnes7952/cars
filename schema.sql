@@ -34,3 +34,15 @@ CREATE INDEX IF NOT EXISTS idx_events_session_event_ts
 -- by event type over a time range. Reading traffic back needs this one.
 CREATE INDEX IF NOT EXISTS idx_events_event_ts
     ON events (event, ts);
+
+-- One row per running `serve` process, so an older process can tell that a
+-- newer release is running beside it and stand down from eviction. Each
+-- release installs to its own directory, so an old process's own file never
+-- changes and cannot tell it on its own. Not an `agents` mutation: no event.
+CREATE TABLE IF NOT EXISTS servers (
+    machine    TEXT,
+    pid        INTEGER,
+    version    TEXT,                  -- plugin.json version the process loaded
+    started_at TEXT,                  -- ISO 8601 UTC
+    PRIMARY KEY (machine, pid)
+);

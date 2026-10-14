@@ -4,6 +4,16 @@ One entry per tagged release. Versions match `.claude-plugin/plugin.json`
 and the `vX.Y.Z` git tag. Releases before 1.18.0 are untagged; see the git
 log for them.
 
+## 1.18.6
+
+- An out-of-date `serve` process stands down from eviction while a newer
+  release is running on the same machine. The existing guard only noticed
+  when the process's own file changed on disk, which never happens for an
+  installed plugin (each release gets its own cache directory), so a
+  days-old process went on evicting with superseded rules. Each `serve` now
+  records its pid and loaded version in a new `servers` table. Processes
+  older than this release cannot take part and stop only when restarted. (#28)
+
 ## 1.18.5
 
 - Peer tools are callable under the name `tools/list` advertises. Since

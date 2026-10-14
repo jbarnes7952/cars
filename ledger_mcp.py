@@ -70,6 +70,7 @@ Config (env, set in ~/.claude/settings.json "env" block):
     LEDGER_TMUX_MODE     window (default) | pane: which tmux object is labelled
 """
 
+import atexit
 import json
 import os
 import re
@@ -120,6 +121,14 @@ CREATE INDEX IF NOT EXISTS idx_events_session_event_ts
 -- by event type over a time range. Reading traffic back needs this one.
 CREATE INDEX IF NOT EXISTS idx_events_event_ts
     ON events (event, ts);
+
+CREATE TABLE IF NOT EXISTS servers (
+    machine    TEXT,
+    pid        INTEGER,
+    version    TEXT,
+    started_at TEXT,
+    PRIMARY KEY (machine, pid)
+);
 """
 
 STALE_SECONDS = 10 * 60          # older than this => flagged stale
@@ -314,10 +323,75 @@ def _source_stamp():
 
 
 _LOADED_SOURCE = _source_stamp()
+_LOADED_VERSION = _plugin_version()
 
 
-def source_is_outdated():
-    """True when the file on disk differs from the one this process loaded.
+def _version_key(version):
+    """``"1.18.4"`` -> ``(1, 18, 4)`` for ordering releases, or None if unparseable."""
+    try:
+        return tuple(int(part) for part in str(version).split("."))
+    except ValueError:
+        return None
+
+
+def record_server(conn):
+    """Record this `serve` process and the version it loaded (see `servers`)."""
+    conn.execute(
+        "INSERT OR REPLACE INTO servers (machine, pid, version, started_at)"
+        " VALUES (?, ?, ?, ?)",
+        (socket.gethostname(), os.getpid(), _LOADED_VERSION, now_iso()),
+    )
+    conn.commit()
+
+
+def forget_server(conn):
+    """Remove this process's `servers` row (clean exit)."""
+    conn.execute(
+        "DELETE FROM servers WHERE machine = ? AND pid = ?",
+        (socket.gethostname(), os.getpid()),
+    )
+    conn.commit()
+
+
+def newer_server_running(conn):
+    """True when a `serve` process on this machine runs a newer release than this one.
+
+    Rows for exited processes are pruned as they are found, so a crashed
+    newer server never makes everyone else stand down for good.
+    """
+    mine = _version_key(_LOADED_VERSION)
+    if mine is None:
+        return False
+    host = socket.gethostname()
+    newer = False
+    dead = []
+    for row in conn.execute(
+            "SELECT pid, version FROM servers WHERE machine = ?", (host,)).fetchall():
+        pid, version = row[0], row[1]
+        if pid == os.getpid():
+            continue
+        if not _pid_alive(pid):
+            dead.append(pid)
+            continue
+        theirs = _version_key(version)
+        if theirs is not None and theirs > mine:
+            newer = True
+    if dead:
+        conn.executemany(
+            "DELETE FROM servers WHERE machine = ? AND pid = ?",
+            [(host, pid) for pid in dead])
+        conn.commit()
+    return newer
+
+
+def source_is_outdated(conn=None):
+    """True when this process is no longer the authority on eviction rules.
+
+    Either the file on disk differs from the one this process loaded (a
+    checkout updated under it), or, given ``conn``, a `serve` process running
+    a newer release is alive on this machine (see `newer_server_running`):
+    an installed plugin puts each release in its own directory, so there the
+    file this process loaded never changes.
 
     A long-lived `serve` process holds whatever Python read at startup, for
     its whole life. On this machine those processes live for days, so a
@@ -335,10 +409,11 @@ def source_is_outdated():
     and only stands down from the destructive operation. Newer processes do
     the evicting.
     """
-    if _LOADED_SOURCE is None:
-        return False
-    current = _source_stamp()
-    return current is not None and current != _LOADED_SOURCE
+    if _LOADED_SOURCE is not None:
+        current = _source_stamp()
+        if current is not None and current != _LOADED_SOURCE:
+            return True
+    return conn is not None and newer_server_running(conn)
 
 
 def row_address(row):
@@ -506,7 +581,7 @@ def evict_stale(conn):
     standing agents vanish from the directory while still running. A row with
     live evidence (see row_is_live) is never evicted however long it idles."""
     # Never delete on rules this process may no longer be the authority on.
-    if source_is_outdated():
+    if source_is_outdated(conn):
         return
     host = socket.gethostname()
     rows = conn.execute("SELECT * FROM agents").fetchall()
@@ -1160,6 +1235,27 @@ def serve():
             state["notified"] = sig
             _write_msg({"jsonrpc": "2.0",
                         "method": "notifications/tools/list_changed"})
+
+    try:
+        conn = connect()
+        try:
+            record_server(conn)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass  # a broken ledger must never stop the server answering
+
+    def _forget():
+        try:
+            conn = connect()
+            try:
+                forget_server(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
+
+    atexit.register(_forget)
 
     poll = _env_int("LEDGER_TOOLS_POLL", 20)
     if poll > 0 and _env_int("LEDGER_AGENT_TOOLS", 1) > 0:
