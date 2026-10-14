@@ -304,10 +304,14 @@ session on its next server start.
   kept as the derived boolean, meaning `presence == "live"`. A live row is
   listed even when stale — an agent idle by design is still somewhere you can
   send a message.
-- Presence prefers positive evidence: a declared `pid` found in `/proc`, else
+- Presence prefers positive evidence: a declared `pid` that is still running
+  (checked with `os.kill(pid, 0)`, which works on Linux and macOS), else
   the transport socket (a `<digits>.sock` name resolves by pid; any other name
   is settled by connecting to it). A service peer that publishes only a pid is
   therefore judged correctly, which the old filename-based check could not do.
+- Not yet supported on Windows: there `os.kill(pid, 0)` does not probe, it
+  sends Ctrl-C (`CTRL_C_EVENT` is 0) to the target. The pid check needs a
+  Windows path (`OpenProcess` + `GetExitCodeProcess` via `ctypes`) first.
 - `unknown` means "could not look", not "dead", and only `unknown` rows fall
   back to the 24-hour activity rule.
 - Eviction follows presence: `gone` evicts at once, `live` never does, and

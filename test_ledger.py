@@ -165,9 +165,18 @@ class LedgerTest(unittest.TestCase):
                if a["session_name"] == "svc-with-pid"][0]
         self.assertEqual(rec["presence"], "live")
 
+    def test_pid_alive_is_portable(self):
+        """Linux-only /proc made every pid on macOS read as dead."""
+        self.assertTrue(self.ledger._pid_alive(os.getpid()))
+        self.assertTrue(self.ledger._pid_alive(str(os.getpid())))
+        self.assertTrue(self.ledger._pid_alive(1), "another uid's pid is alive")
+        self.assertFalse(self.ledger._pid_alive(999999))
+        for bogus in (0, -1, "0", "x", None, 2**64):
+            self.assertFalse(self.ledger._pid_alive(bogus), repr(bogus))
+
     def test_presence_gone_when_a_declared_pid_is_dead(self):
         dead = 999999
-        self.assertFalse(os.path.exists(f"/proc/{dead}"), "pick an unused pid")
+        self.assertFalse(self.ledger._pid_alive(dead), "pick an unused pid")
         self.call("register", session_name="svc-dead-pid", pid=dead)
         names = {a["session_name"] for a in
                  self.call("list_agents_detailed", include_stale=True)["agents"]}
@@ -476,7 +485,10 @@ class LedgerTest(unittest.TestCase):
         sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
         sock.bind(path)
         if listening:
-            sock.listen(1)
+            # Nothing ever accepts, so every probe stays queued. A full
+            # backlog is EAGAIN on Linux but ECONNREFUSED on macOS --
+            # indistinguishable from no listener -- so leave room.
+            sock.listen(socketlib.SOMAXCONN)
         self.addCleanup(sock.close)
         return path
 
@@ -648,7 +660,7 @@ class LedgerTest(unittest.TestCase):
         path = os.path.join(self.tmp.name, basename)
         sock = socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)
         sock.bind(path)
-        sock.listen(1)
+        sock.listen(socketlib.SOMAXCONN)  # see _bind_socket
         self.addCleanup(sock.close)
         return f"uds:{path}", path
 
